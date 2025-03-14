@@ -8,6 +8,7 @@
 
 #include "./atomic.cuh"
 #include "./fp16.cuh"
+#include <limits>
 #include <cmath>
 
 namespace dgl {
