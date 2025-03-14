@@ -4,9 +4,21 @@ version = "0.7.2"
 requires-python = ">=3.12"
 dependencies = [
     "dgl",
+    "scikit-learn>=1.6.1",
     "torch>=2.6.0",
     "tqdm>=4.67.1",
 ]
 
 [tool.uv.sources]
 dgl = { path = "python", editable = true }
+torch = [
+  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
