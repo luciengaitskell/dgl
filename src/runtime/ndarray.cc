@@ -12,6 +12,7 @@
 #include <dgl/zerocopy_serializer.h>
 #include <dgl/runtime/tensordispatch.h>
 #include "runtime_base.h"
+#include <cstdint>
 
 // deleter for arrays used by DLPack exporter
 extern "C" void NDArrayDLPackDeleter(DLManagedTensor* tensor);

@@ -136,6 +136,10 @@ else(MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DIDXTYPEWIDTH=64 -DREALTYPEWIDTH=32")
 endif(MSVC)
 
+# Cludge fixes
+add_definitions(-Wno-maybe-uninitialized)
+# add_definitions(-Wno-deprecated-declarations)
+
 # configure minigun
 add_definitions(-DENABLE_PARTIAL_FRONTIER=0)  # disable minigun partial frontier compile
 # Source file lists
@@ -223,7 +227,7 @@ endif(NOT MSVC)
 
 # Compile LIBXSMM
 if((NOT MSVC) AND USE_LIBXSMM)
-  add_custom_target(libxsmm COMMAND make realclean COMMAND make -j BLAS=0
+  add_custom_target(libxsmm COMMAND make realclean COMMAND make -j BLAS=0 WERROR=0
                      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/libxsmm
                      )
   add_dependencies(dgl libxsmm)
