@@ -12,6 +12,8 @@ from ..random import choice as random_choice
 from ..data.utils import load_graphs, save_graphs, load_tensors, save_tensors
 from ..transform import metis_partition_assignment, partition_graph_with_halo
 from .graph_partition_book import BasicPartitionBook, RangePartitionBook
+import torch
+import psutil
 
 def _get_inner_node_mask(graph, ntype_id):
     if NTYPE in graph.ndata:
@@ -90,30 +92,37 @@ def load_partition(part_config, part_id):
     assert 'edge_feats' in part_files, "the partition does not contain edge feature."
     assert 'part_graph' in part_files, "the partition does not contain graph structure."
     node_feats = load_tensors(relative_to_config(part_files['node_feats']))
-    edge_feats = load_tensors(relative_to_config(part_files['edge_feats']))
+    print('loaded node feats')
+    # edge_feats = load_tensors(relative_to_config(part_files['edge_feats']))
+    # print('loaded edge feats')
     graph = load_graphs(relative_to_config(part_files['part_graph']))[0][0]
+    print('loaded graph')
     # In the old format, the feature name doesn't contain node/edge type.
     # For compatibility, let's add node/edge types to the feature names.
     node_feats1 = {}
-    edge_feats1 = {}
+    # edge_feats1 = {}
     for name in node_feats:
         feat = node_feats[name]
         if name.find('/') == -1:
             name = '_N/' + name
         node_feats1[name] = feat
+    '''
     for name in edge_feats:
         feat = edge_feats[name]
         if name.find('/') == -1:
             name = '_E/' + name
         edge_feats1[name] = feat
+    '''
     node_feats = node_feats1
-    edge_feats = edge_feats1
+    # edge_feats = edge_feats1
 
     assert NID in graph.ndata, "the partition graph should contain node mapping to global node ID"
     assert EID in graph.edata, "the partition graph should contain edge mapping to global edge ID"
+    del graph.edata[EID]
 
     gpb, graph_name, ntypes, etypes = load_partition_book(part_config, part_id, graph)
     ntypes_list, etypes_list = [], []
+    '''
     for ntype in ntypes:
         ntype_id = ntypes[ntype]
         # graph.ndata[NID] are global homogeneous node IDs.
@@ -134,7 +143,9 @@ def load_partition(part_config, part_id):
         assert np.all(F.asnumpy(partids1 == part_id)), 'load a wrong partition'
         assert np.all(F.asnumpy(partids2 == part_id)), 'load a wrong partition'
         etypes_list.append(etype)
-    return graph, node_feats, edge_feats, gpb, graph_name, ntypes_list, etypes_list
+    '''
+    # return graph, node_feats, edge_feats, gpb, graph_name, ntypes_list, etypes_list
+    return graph, node_feats, None, gpb, graph_name, ntypes_list, etypes_list
 
 def load_partition_book(part_config, part_id, graph=None):
     ''' Load a graph partition book from the partition config file.
@@ -563,29 +574,48 @@ def partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method=
         parts[0].ndata['inner_node'] = F.ones((sim_g.number_of_nodes(),), F.int8, F.cpu())
         parts[0].edata['inner_edge'] = F.ones((sim_g.number_of_edges(),), F.int8, F.cpu())
     elif part_method in ('metis', 'random'):
-        sim_g, balance_ntypes = get_homogeneous(g, balance_ntypes)
-        if part_method == 'metis':
-            assert num_trainers_per_machine >= 1
-            if num_trainers_per_machine > 1:
-                # First partition the whole graph to each trainer and save the trainer ids in
-                # the node feature "trainer_id".
-                node_parts = metis_partition_assignment(
-                    sim_g, num_parts * num_trainers_per_machine,
-                    balance_ntypes=balance_ntypes,
-                    balance_edges=balance_edges,
-                    mode='k-way')
-                _set_trainer_ids(g, sim_g, node_parts)
-
-                # And then coalesce the partitions of trainers on the same machine into one
-                # larger partition.
-                node_parts = F.floor_div(node_parts, num_trainers_per_machine)
-            else:
-                node_parts = metis_partition_assignment(sim_g, num_parts,
-                                                        balance_ntypes=balance_ntypes,
-                                                        balance_edges=balance_edges)
+        cache_dir = '/data/ds/cache/'
+        cache_filename = 'metis-assignment-{}-part{}.pt'.format(graph_name, num_parts)
+        cache_path = os.path.join(cache_dir, cache_filename)
+        if os.path.exists(cache_path):
+            print('Load cached assignment on {}'.format(cache_path))
+            node_parts = torch.load(cache_path)
+            print('Done')
         else:
-            node_parts = random_choice(num_parts, sim_g.number_of_nodes())
-        parts, orig_nids, orig_eids = partition_graph_with_halo(sim_g, node_parts, num_hops,
+            if part_method == 'metis':
+                sim_g, balance_ntypes = get_homogeneous(g, balance_ntypes)
+                process = psutil.Process(os.getpid())
+                print('Host memory usage after get homo: {} GB'.format(process.memory_info().rss / 1e9))
+                assert num_trainers_per_machine >= 1
+                if num_trainers_per_machine > 1:
+                    # First partition the whole graph to each trainer and save the trainer ids in
+                    # the node feature "trainer_id".
+                    node_parts = metis_partition_assignment(
+                        sim_g, num_parts * num_trainers_per_machine,
+                        balance_ntypes=balance_ntypes,
+                        balance_edges=balance_edges,
+                        mode='k-way')
+                    _set_trainer_ids(g, sim_g, node_parts)
+
+                    # And then coalesce the partitions of trainers on the same machine into one
+                    # larger partition.
+                    node_parts = F.floor_div(node_parts, num_trainers_per_machine)
+                else:
+                    start_ts = time.time()
+                    node_parts = metis_partition_assignment(sim_g, num_parts,
+                                                            balance_ntypes=balance_ntypes,
+                                                            balance_edges=balance_edges)
+                    end_ts = time.time()
+                    print('Metis partition time:', end_ts - start_ts)
+                    if not os.path.exists(cache_dir):
+                        os.makedirs(cache_dir)
+                    print('Writing node assignment cache to {}'.format(cache_path))
+                    torch.save(node_parts, cache_path)
+                    print('Done')
+                    exit()
+            else:
+                node_parts = random_choice(num_parts, sim_g.number_of_nodes())
+        parts, orig_nids, orig_eids = partition_graph_with_halo(g, node_parts, num_hops,
                                                                 reshuffle=reshuffle)
         if return_mapping:
             orig_nids, orig_eids = _get_orig_ids(g, sim_g, reshuffle, orig_nids, orig_eids)
@@ -743,7 +773,7 @@ def partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method=
                 local_nodes = F.boolean_mask(part.ndata[ndata_name], inner_node_mask)
                 if len(g.ntypes) > 1:
                     # If the input is a heterogeneous graph.
-                    local_nodes = F.gather_row(sim_g.ndata[NID], local_nodes)
+                    local_nodes = F.gather_row(g.ndata[NID], local_nodes)
                     print('part {} has {} nodes of type {} and {} are inside the partition'.format(
                         part_id, F.as_scalar(F.sum(part.ndata[NTYPE] == ntype_id, 0)),
                         ntype, len(local_nodes)))
@@ -764,7 +794,7 @@ def partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method=
                 # This is global edge IDs.
                 local_edges = F.boolean_mask(part.edata[edata_name], inner_edge_mask)
                 if len(g.etypes) > 1:
-                    local_edges = F.gather_row(sim_g.edata[EID], local_edges)
+                    local_edges = F.gather_row(g.edata[EID], local_edges)
                     print('part {} has {} edges of type {} and {} are inside the partition'.format(
                         part_id, F.as_scalar(F.sum(part.edata[ETYPE] == etype_id, 0)),
                         etype, len(local_edges)))
@@ -838,7 +868,7 @@ def partition_graph(g, graph_name, num_parts, out_path, num_hops=1, part_method=
         json.dump(part_metadata, outfile, sort_keys=True, indent=4)
     print('Save partitions: {:.3f} seconds'.format(time.time() - start))
 
-    num_cuts = sim_g.number_of_edges() - tot_num_inner_edges
+    num_cuts = g.number_of_edges() - tot_num_inner_edges
     if num_parts == 1:
         num_cuts = 0
     print('There are {} edges in the graph and {} edge cuts for {} partitions.'.format(
