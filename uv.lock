@@ -1,0 +1,7 @@
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "dgl-dev"
+version = "0.7.2"
+source = { virtual = "." }

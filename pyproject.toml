@@ -1,0 +1,5 @@
+[project]
+name = "dgl-dev"
+version = "0.7.2"
+requires-python = ">=3.12"
+dependencies = []
