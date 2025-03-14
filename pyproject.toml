@@ -4,6 +4,7 @@ version = "0.7.2"
 requires-python = ">=3.12"
 dependencies = [
     "dgl",
+    "torch>=2.6.0",
 ]
 
 [tool.uv.sources]
