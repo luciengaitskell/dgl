@@ -130,6 +130,7 @@ HaloHeteroSubgraph GetSubgraphWithHalo(std::shared_ptr<HeteroGraph> hg,
     }
   }
 
+  /* DGNN: Remove out edges
   if (num_hops > 0) {
     EdgeArray out_edges = hg->OutEdges(0, nodes);
     auto src = out_edges.src;
@@ -155,6 +156,7 @@ HaloHeteroSubgraph GetSubgraphWithHalo(std::shared_ptr<HeteroGraph> hg,
       }
     }
   }
+  */
 
   // We assign new Ids to the nodes in the subgraph. We ensure that the HALO
   // nodes are behind the input nodes.
@@ -250,7 +252,7 @@ DGL_REGISTER_GLOBAL("partition._CAPI_DGLPartitionWithHalo_Hetero")
     // try to construct in-CSR and out-CSR in openmp for loop, which will lead
     // to some unexpected results.
     ugptr->GetInCSR();
-    ugptr->GetOutCSR();
+    // ugptr->GetOutCSR();
     std::vector<std::shared_ptr<HaloHeteroSubgraph>> subgs(max_part_id + 1);
     int num_partitions = part_nodes.size();
     runtime::parallel_for(0, num_partitions, [&](int b, int e) {
