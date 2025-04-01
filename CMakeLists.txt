@@ -226,7 +226,7 @@ target_include_directories(dgl PRIVATE ${ZMQ_INCLUDE_DIR})
 list(APPEND DGL_LINKER_LIBS ${ZMQ_LIBRARY})
 
 # NVML
-list(APPEND DGL_LINKER_LIBS /usr/local/cuda/lib64/stubs/libnvidia-ml.so)
+list(APPEND DGL_LINKER_LIBS ${CUDA_TOOLKIT_ROOT_DIR}/lib64/stubs/libnvidia-ml.so)
 
 # For serialization
 if (USE_HDFS)
