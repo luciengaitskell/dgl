@@ -139,6 +139,14 @@ def run(rank, args):
                               # Don't pass the weight if we're not using it
                               weight=None, is_bias=False)
 
+    # Add debugging information to help diagnose the issue
+    print("DEBUG - sampler attributes:", 
+          "num_vertices type:", type(num_vertices), 
+          "min_vids type:", type(min_vids), 
+          "global_nid_map type:", type(global_nid_map),
+          "min_vids dtype:", min_vids.dtype,
+          "global_nid_map dtype:", global_nid_map.dtype)
+
     # Now it's safe to clear train_g if needed
     # train_g = None
 
