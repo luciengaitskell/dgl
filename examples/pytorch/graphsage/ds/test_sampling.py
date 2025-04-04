@@ -103,22 +103,14 @@ def run(rank, args):
     index = train_g.adj_sparse('csr')[0]
     adj = train_g.adj_sparse('csr')[1]
     
-    # Create a valid weights tensor even if we're not using bias sampling
-    # This avoids the null pointer exception in the C++ code
-    weights = th.ones(adj.shape, dtype=th.float32, device=device)
-    is_bias = False
+    # Create a valid weights tensor with integer dtype, not float
+    weights = th.ones(adj.shape, dtype=th.int32, device=device)
+    # Set is_bias to None instead of False - this avoids using the weight when it's not needed
+    is_bias = None
     
     num_vertices = index.shape[0] - 1
     print(num_vertices)
     print("rank", rank, index)
-    
-    # If you want to use the original weighting scheme, uncomment this
-    '''
-    for i in range(num_vertices):
-        offset = index[i]
-        degree = index[i + 1] - offset
-        weights[offset: offset + degree] = th.arange(0, degree, dtype=th.float32)
-    '''
     
     th.cuda.synchronize()
     print("rank", rank, weights)
@@ -143,7 +135,9 @@ def run(rank, args):
                               min_eids,
                               global_nid_map,
                               fanout,
-                              dgl.ds.sample_neighbors, device, weight=weights, is_bias=is_bias)
+                              dgl.ds.sample_neighbors, device, 
+                              # Don't pass the weight if we're not using it
+                              weight=None, is_bias=False)
 
     # Now it's safe to clear train_g if needed
     # train_g = None
