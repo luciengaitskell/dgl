@@ -90,7 +90,7 @@ def run(rank, args):
     print('rank {}, # global: {}, # local: {}'.format(rank, num_vertices, n_local_nodes))
     print('edges: ', g.number_of_edges())
     # print('# in feats:', node_feats['_N/features'].shape[1])
-    train_nid = th.masked_select(g.nodes()[:n_local_nodes], node_feats['_N/train_mask'])
+    train_nid = th.masked_select(g.nodes()[:n_local_nodes], node_feats['_N/train_mask'].bool())
     train_nid = dgl.ds.rebalance_train_nids(train_nid, args.batch_size, g.ndata[dgl.NID])
 
     # print('# batch: ', train_nid.size()[0] / args.batch_size)
