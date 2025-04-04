@@ -128,13 +128,14 @@ def run(rank, args):
             args.graph_cache_gb, g.number_of_edges(), 8)
     dgl.ds.cache_graph(train_g, args.graph_cache_ratio)
     global_nid_map = train_g.ndata[dgl.NID].to(device)
-    train_g = None
-    #todo: transfer gpb to gpu
+    
+    # Don't set train_g to None until after creating the sampler
+    # train_g = None  <-- This line is causing the problem
+    
     min_vids = [0] + list(gpb._max_node_ids)
     min_vids = F.tensor(min_vids, dtype=F.int64).to(device)
     min_eids = [0] + list(gpb._max_edge_ids)
     min_eids = F.tensor(min_eids, dtype=F.int64).to(device)
-
 
     fanout = [int(fanout) for fanout in args.fan_out.split(',')]
     sampler = NeighborSampler(train_g, num_vertices,
@@ -144,8 +145,11 @@ def run(rank, args):
                               fanout,
                               dgl.ds.sample_neighbors, device, weight=weights, is_bias=is_bias)
 
+    # Now it's safe to clear train_g if needed
+    # train_g = None
+
     dataloader = dgl.dataloading.NodeDataLoader(
-        train_g,
+        train_g,  # Keep using train_g here
         train_nid,
         sampler,
         device=device,
