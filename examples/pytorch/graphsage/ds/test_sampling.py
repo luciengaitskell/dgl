@@ -102,8 +102,8 @@ def run(rank, args):
     train_g = dgl.ds.csr_to_global_id(train_g, train_g.ndata[dgl.NID])
     index = train_g.adj_sparse('csr')[0]
     adj = train_g.adj_sparse('csr')[1]
-    # weights = th.ones(adj.shape, dtype=th.int32)
-    weights = None
+    weights = th.ones(adj.shape, dtype=th.int32)
+    # weights = None
     num_vertices = index.shape[0] - 1
     print(num_vertices)
     print("rank", rank, index)
@@ -122,15 +122,25 @@ def run(rank, args):
             args.graph_cache_gb, g.number_of_edges(), 8)
     dgl.ds.cache_graph(train_g, args.graph_cache_ratio)
     global_nid_map = train_g.ndata[dgl.NID].to(device)
-    train_g = None
-    #todo: transfer gpb to gpu
+    
+    # Make sure weights is pinned and accessible by CUDA
+    if weights is not None:
+        # Convert to int64 to match IdArray type expectations
+        weights = weights.to(dtype=th.int64)
+        # Pin the memory if it's on CPU, or make sure it's on the right device
+        if weights.device.type == 'cpu':
+            weights = weights.pin_memory()
+        else:
+            weights = weights.to(device)
+        
     min_vids = [0] + list(gpb._max_node_ids)
     min_vids = F.tensor(min_vids, dtype=F.int64).to(device)
     min_eids = [0] + list(gpb._max_edge_ids)
     min_eids = F.tensor(min_eids, dtype=F.int64).to(device)
 
-
     fanout = [int(fanout) for fanout in args.fan_out.split(',')]
+    
+    # Create the sampler with the properly prepared weights
     sampler = NeighborSampler(train_g, num_vertices,
                               min_vids,
                               min_eids,
@@ -199,4 +209,4 @@ if __name__ == '__main__':
           args=(args,),
           nprocs=args.n_ranks,
           join=True)
-  
+
