@@ -102,21 +102,27 @@ def run(rank, args):
     train_g = dgl.ds.csr_to_global_id(train_g, train_g.ndata[dgl.NID])
     index = train_g.adj_sparse('csr')[0]
     adj = train_g.adj_sparse('csr')[1]
-    # weights = th.ones(adj.shape, dtype=th.int32)
-    weights = None
+    
+    # Create a valid weights tensor even if we're not using bias sampling
+    # This avoids the null pointer exception in the C++ code
+    weights = th.ones(adj.shape, dtype=th.float32, device=device)
+    is_bias = False
+    
     num_vertices = index.shape[0] - 1
     print(num_vertices)
     print("rank", rank, index)
+    
+    # If you want to use the original weighting scheme, uncomment this
     '''
     for i in range(num_vertices):
         offset = index[i]
         degree = index[i + 1] - offset
-        weights[offset: offset + degree] = th.arange(0, degree, dtype=th.int32)
-    weights = F.tensor(weights, dtype=F.int32).to(device)
+        weights[offset: offset + degree] = th.arange(0, degree, dtype=th.float32)
     '''
+    
     th.cuda.synchronize()
     print("rank", rank, weights)
-    # print("rank", rank, weights.shape)
+    
     if args.graph_cache_gb != -1:
         args.graph_cache_ratio = calculate_ratio(
             args.graph_cache_gb, g.number_of_edges(), 8)
@@ -136,7 +142,7 @@ def run(rank, args):
                               min_eids,
                               global_nid_map,
                               fanout,
-                              dgl.ds.sample_neighbors, device, weight=weights, is_bias=False)
+                              dgl.ds.sample_neighbors, device, weight=weights, is_bias=is_bias)
 
     dataloader = dgl.dataloading.NodeDataLoader(
         train_g,
@@ -199,4 +205,4 @@ if __name__ == '__main__':
           args=(args,),
           nprocs=args.n_ranks,
           join=True)
-  
+
