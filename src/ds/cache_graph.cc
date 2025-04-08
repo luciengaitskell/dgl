@@ -67,10 +67,15 @@ DGL_REGISTER_GLOBAL("ds.cache._CAPI_DGLDSCacheGraph")
   LOG(INFO) << "[Rank] " << rank << " Host nodes: " << host_indptr.size() - 1 << " host edges: " << host_indices.size();
 
   context->dev_graph = CSRMatrix(n_cached_nodes, n_cached_nodes, IdArray::FromVector(dev_indptr, {kDLGPU, rank}), IdArray::FromVector(dev_indices, {kDLGPU, rank}));
-  context->uva_graph = CSRMatrix(n_uva_nodes, n_uva_nodes, IdArray::FromVector(host_indptr, {kDLCPU, 0}), IdArray::FromVector(host_indices, {kDLCPU, 0}));
+  
+  // Only allocate and register UVA graph if it's not empty
+  if (host_indptr.size() - 1 > 0) {
+    context->uva_graph = CSRMatrix(n_uva_nodes, n_uva_nodes, IdArray::FromVector(host_indptr, {kDLCPU, 0}), IdArray::FromVector(host_indices, {kDLCPU, 0}));
+    Register(context->uva_graph.indptr);
+    Register(context->uva_graph.indices);
+  }
+  
   context->adj_pos_map = IdArray::FromVector(adj_pos_map, {kDLGPU, rank});
-  Register(context->uva_graph.indptr);
-  Register(context->uva_graph.indices);
   context->n_cached_nodes = n_cached_nodes;
   context->n_uva_nodes = n_uva_nodes;
   context->graph_loaded = true;
