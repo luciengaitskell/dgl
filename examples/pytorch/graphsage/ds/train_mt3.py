@@ -40,6 +40,7 @@ def setup(rank, world_size):
 
 
 def cleanup():
+    
     dist.destroy_process_group()
 
 
@@ -75,7 +76,6 @@ class NeighborSampler(object):
                                              self.device_min_vids, self.device_min_eids,
                                              seeds, fanout, self.global_nid_map,
                                              is_local=is_local)
-
             is_local = False
             # Then we compact the frontier into a bipartite graph for message passing.
             block = dgl.to_block(
@@ -262,7 +262,7 @@ def run(rank, args):
         rank, num_vertices, n_local_nodes))
     print('# in feats:', in_feats)
     train_nid = th.masked_select(
-        g.nodes()[:n_local_nodes], node_feats['_N/train_mask'])
+        g.nodes()[:n_local_nodes], node_feats['_N/train_mask'].bool())
     train_nid = dgl.ds.rebalance_train_nids(
         train_nid, args.batch_size, g.ndata[dgl.NID])
     train_label = dgl.ds.allgather_train_labels(node_feats['_N/labels'])

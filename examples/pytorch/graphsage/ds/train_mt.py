@@ -166,7 +166,7 @@ def run(rank, args, train_label):
     n_local_nodes = node_feats['_N/train_mask'].shape[0]
     print('rank {}, # global: {}, # local: {}'.format(rank, num_vertices, n_local_nodes))
     print('# in feats:', node_feats['_N/features'].shape[1])
-    train_nid = th.masked_select(g.nodes()[:n_local_nodes], node_feats['_N/train_mask'])
+    train_nid = th.masked_select(g.nodes()[:n_local_nodes], node_feats['_N/train_mask'].bool())
     train_nid = dgl.ds.rebalance_train_nids(train_nid, args.batch_size, g.ndata[dgl.NID])
 
     n_classes = len(th.unique(train_label[th.logical_not(th.isnan(train_label))]))
