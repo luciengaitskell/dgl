@@ -1,24 +1,28 @@
 [project]
 name = "dgl-dev"
 version = "0.7.2"
-requires-python = ">=3.12"
+requires-python = "~=3.8.0"
 dependencies = [
     "dgl",
-    "scikit-learn>=1.6.1",
-    "torch>=2.6.0",
+    "numpy<2.0.0",
+    "ogb>=1.3.6",
+    "psutil>=7.0.0",
+    "pynvml>=11.5.3",
+    "torch~=1.10.0",
+    "torchmetrics>=1.5.2",
     "tqdm>=4.67.1",
 ]
 
 [tool.uv.sources]
 dgl = { path = "python", editable = true }
 torch = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu113", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 torchvision = [
-  { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu113", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu118"
-url = "https://download.pytorch.org/whl/cu118"
+name = "pytorch-cu113"
+url = "https://download.pytorch.org/whl/cu113"
 explicit = true
