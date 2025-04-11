@@ -12,6 +12,38 @@ namespace ds {
 using namespace dgl::runtime;
 using namespace dgl::aten;
 
+// Function to get NCCL datatype based on DGL dtype
+ncclDataType_t GetNCCLDataType(const DLDataType &dtype) {
+  if (dtype.code == kDLInt) {
+    if (dtype.bits == 32)
+      return ncclInt32;
+    if (dtype.bits == 64)
+      return ncclInt64;
+  } else if (dtype.code == kDLFloat) {
+    if (dtype.bits == 32)
+      return ncclFloat32;
+    if (dtype.bits == 64)
+      return ncclFloat64;
+  }
+  LOG(FATAL) << "Unsupported dtype for NCCL operation";
+  return ncclFloat32; // Never reach here, just to silence compiler warnings
+}
+
+// Helper function for binary search in the kernel
+__device__ int64_t binarySearch(uint32_t *elements, int64_t left, int64_t right,
+                                uint32_t element_to_find) {
+
+  int64_t mid = left;
+  while (mid <= right) {
+    if (elements[mid] == element_to_find) {
+      return mid - left;
+    }
+    mid += 1;
+  }
+
+  return right - left;
+}
+
 // CUDA kernel for persistent neighbor sampling
 __global__ void PersistentSamplingKernel(
     volatile IdType *task_flags, volatile IdType *task_counts,

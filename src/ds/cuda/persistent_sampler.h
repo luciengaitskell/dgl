@@ -1,16 +1,35 @@
 #ifndef DGL_DS_CUDA_PERSISTENT_SAMPLER_H_
 #define DGL_DS_CUDA_PERSISTENT_SAMPLER_H_
 
-#include "../context.h"
+// Standard library includes
 #include <atomic>
 #include <condition_variable>
-#include <dgl/array.h>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <vector>
+
+// CUDA includes
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+
+// DGL includes
+#include "../cuda/cuda_utils.h"
+#include <dgl/array.h>
+#include <dgl/aten/csr.h>
+
+// Define types before including context.h
+namespace dgl {
+namespace ds {
+using IdType = int64_t;
+using DataType = float;
+} // namespace ds
+} // namespace dgl
+
+// Include context after type definitions
+#include "../context.h"
 
 namespace dgl {
 namespace ds {
@@ -26,6 +45,15 @@ struct SamplingTask {
   bool bias;
   IdArray weight;
   std::promise<IdArray> result_promise;
+
+  // Add move constructor and assignment to fix deleted function error
+  SamplingTask() = default;
+  SamplingTask(SamplingTask &&other) = default;
+  SamplingTask &operator=(SamplingTask &&other) = default;
+
+  // Delete copy constructor and assignment as std::promise is not copyable
+  SamplingTask(const SamplingTask &) = delete;
+  SamplingTask &operator=(const SamplingTask &) = delete;
 };
 
 // Structure to hold the state of the persistent sampler
