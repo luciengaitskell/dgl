@@ -41,8 +41,9 @@ ncclDataType_t GetNCCLDataType(const DLDataType &dtype) {
 }
 
 // Helper function for binary search in the kernel
-__device__ int64_t binarySearch(uint32_t *elements, int64_t left, int64_t right,
-                                uint32_t element_to_find) {
+__device__ inline int64_t binarySearch(uint32_t *elements, int64_t left,
+                                       int64_t right,
+                                       uint32_t element_to_find) {
 
   int64_t mid = left;
   while (mid <= right) {
