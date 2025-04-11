@@ -178,8 +178,12 @@ void InitializePersistentSampler(DSContext *context, IdArray min_vids,
   // Initialize queues for peer-to-peer communication
   state->p2p_send_queues.resize(world_size);
   state->p2p_recv_queues.resize(world_size);
-  state->p2p_queue_mutexes.resize(world_size);
-  state->p2p_cvs.resize(world_size);
+
+  // Initialize mutexes and condition variables with unique_ptr
+  for (int i = 0; i < world_size; i++) {
+    state->p2p_queue_mutexes.push_back(std::make_unique<std::mutex>());
+    state->p2p_cvs.push_back(std::make_unique<std::condition_variable>());
+  }
 
   // Allocate memory for task management
   context->task_flags = Full<int64_t>(0, state->max_tasks, min_vids->ctx);
@@ -482,8 +486,8 @@ void P2PCommunicationThread(DSContext *context, int target_rank) {
     bool has_data = false;
 
     {
-      std::unique_lock<std::mutex> lock(state->p2p_queue_mutexes[target_rank]);
-      if (state->p2p_cvs[target_rank].wait_for(
+      std::unique_lock<std::mutex> lock(*state->p2p_queue_mutexes[target_rank]);
+      if (state->p2p_cvs[target_rank]->wait_for(
               lock, std::chrono::milliseconds(1), [&]() {
                 return !state->p2p_send_queues[target_rank].empty() ||
                        state->shutdown;
@@ -611,12 +615,12 @@ P2PDistributeResult P2PDistributeSeeds(DSContext *context, IdArray seeds,
 
       // Queue the seeds for P2P transfer
       {
-        std::lock_guard<std::mutex> lock(state->p2p_queue_mutexes[i]);
+        std::lock_guard<std::mutex> lock(*state->p2p_queue_mutexes[i]);
         state->p2p_send_queues[i].push(seeds_to_send);
       }
 
       // Notify the P2P thread
-      state->p2p_cvs[i].notify_one();
+      state->p2p_cvs[i]->notify_one();
     }
 
     // In a real implementation, would need a synchronization mechanism
@@ -718,12 +722,12 @@ P2PCollectResult P2PCollectResults(DSContext *context, IdArray neighbors,
 
       // Queue the neighbors for P2P transfer
       {
-        std::lock_guard<std::mutex> lock(state->p2p_queue_mutexes[i]);
+        std::lock_guard<std::mutex> lock(*state->p2p_queue_mutexes[i]);
         state->p2p_send_queues[i].push(neighbors_to_send);
       }
 
       // Notify the P2P thread
-      state->p2p_cvs[i].notify_one();
+      state->p2p_cvs[i]->notify_one();
     }
   }
 
@@ -754,7 +758,7 @@ void ShutdownPersistentSampler(DSContext *context) {
   state->shutdown = true;
   state->cv.notify_all();
   for (auto &cv : state->p2p_cvs) {
-    cv.notify_all();
+    cv->notify_all();
   }
 
   // Wait for threads to finish

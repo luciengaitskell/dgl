@@ -66,8 +66,8 @@ struct PersistentSamplerState {
   // Peer-to-peer communication queues (one per remote rank)
   std::vector<std::queue<IdArray>> p2p_send_queues;
   std::vector<std::queue<IdArray>> p2p_recv_queues;
-  std::vector<std::mutex> p2p_queue_mutexes;
-  std::vector<std::condition_variable> p2p_cvs;
+  std::vector<std::unique_ptr<std::mutex>> p2p_queue_mutexes;
+  std::vector<std::unique_ptr<std::condition_variable>> p2p_cvs;
 
   // Control flags
   std::atomic<bool> shutdown{false};
