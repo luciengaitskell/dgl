@@ -11,9 +11,9 @@
 #include <thread>
 #include <vector>
 
-#include "coordinator.h"
 #include "./comm/comm_info.h"
 #include "./profiler.h"
+#include "coordinator.h"
 
 using namespace dgl::runtime;
 using namespace dgl::aten;
@@ -24,9 +24,13 @@ namespace ds {
 // Forward declare the PersistentSamplerState
 struct PersistentSamplerState;
 
-enum FeatMode { kFeatModeAllCache, kFeatModePartitionCache, kFeatModeReplicateCache };
+enum FeatMode {
+  kFeatModeAllCache,
+  kFeatModePartitionCache,
+  kFeatModeReplicateCache
+};
 
-#define ENCODE_ID(i) (-(i)-2)
+#define ENCODE_ID(i) (-(i) - 2)
 
 #define SAMPLER_ROLE 0
 #define LOADER_ROLE 1
@@ -37,7 +41,7 @@ enum FeatMode { kFeatModeAllCache, kFeatModePartitionCache, kFeatModeReplicateCa
 struct DSThreadEntry {
   IdArray pinned_array[N_PINNED_ARRAY];
   int pinned_array_counter;
-  static DSThreadEntry* ThreadLocal();
+  static DSThreadEntry *ThreadLocal();
 };
 
 struct DSContext {
@@ -46,7 +50,7 @@ struct DSContext {
   int rank;
   int thread_num;
   std::vector<ncclComm_t> nccl_comm;
-  std::vector<std::unique_ptr<CommInfo> > comm_info;
+  std::vector<std::unique_ptr<CommInfo>> comm_info;
   std::unique_ptr<Coordinator> coordinator;
   std::unique_ptr<Coordinator> comm_coordinator;
 
@@ -55,7 +59,6 @@ struct DSContext {
   FeatMode feat_mode;
   IdArray dev_feats, shared_feats, feat_pos_map;
   int feat_dim;
-
 
   // Graph related arrays
   bool graph_loaded = false;
@@ -90,13 +93,13 @@ struct DSContext {
   uint32_t **task_weights = nullptr;
   cudaStream_t persistent_kernel_stream;
 
-  static DSContext* Global() {
+  static DSContext *Global() {
     static DSContext instance;
     return &instance;
   }
 };
 
-}
-}
+} // namespace ds
+} // namespace dgl
 
 #endif
