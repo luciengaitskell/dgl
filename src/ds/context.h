@@ -1,14 +1,14 @@
 #ifndef DGL_DS_CONTEXT_H_
 #define DGL_DS_CONTEXT_H_
 
-#include <nccl.h>
+#include <atomic>
+#include <dgl/array.h>
 #include <dgl/packed_func_ext.h>
 #include <dgl/runtime/registry.h>
-#include <dgl/array.h>
-#include <memory>
-#include <atomic>
 #include <dmlc/thread_local.h>
-#include <atomic>
+#include <memory>
+#include <nccl.h>
+#include <thread>
 #include <vector>
 
 #include "coordinator.h"
@@ -20,6 +20,9 @@ using namespace dgl::aten;
 
 namespace dgl {
 namespace ds {
+
+// Forward declare the PersistentSamplerState
+struct PersistentSamplerState;
 
 enum FeatMode { kFeatModeAllCache, kFeatModePartitionCache, kFeatModeReplicateCache };
 
@@ -70,6 +73,22 @@ struct DSContext {
   // Profiler
   bool enable_profiler;
   std::unique_ptr<Profiler> profiler;
+
+  // Persistent sampler related
+  std::shared_ptr<PersistentSamplerState> persistent_sampler_state;
+  bool persistent_sampler_initialized = false;
+  std::thread sampler_thread;
+  std::vector<std::thread> p2p_threads;
+
+  // Persistent kernel variables
+  IdArray task_flags;
+  IdArray task_counts;
+  IdType **task_seeds = nullptr;
+  IdType **task_results = nullptr;
+  int *task_fanouts = nullptr;
+  bool *task_bias_flags = nullptr;
+  uint32_t **task_weights = nullptr;
+  cudaStream_t persistent_kernel_stream;
 
   static DSContext* Global() {
     static DSContext instance;

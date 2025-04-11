@@ -1,13 +1,14 @@
 #ifndef DGL_DS_KERNEL_H_
 #define DGL_DS_KERNEL_H_
 
+#include "../../runtime/cuda/cuda_common.h"
+#include "cuda_utils.h"
+#include "persistent_sampler.h"
+#include <dgl/array.h>
+#include <dgl/aten/csr.h>
 #include <nccl.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <dgl/array.h>
-#include <dgl/aten/csr.h>
-#include "../../runtime/cuda/cuda_common.h"
-#include "cuda_utils.h"
 
 using namespace dgl;
 using namespace dgl::aten;

@@ -80,34 +80,27 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
     LOG(FATAL) << "Seeds are not on GPUs";
   }
 
-  if (is_local) {
-    seeds = Partition(seeds, min_vids);
-    CUDACHECK(cudaStreamSynchronize(s));
-  }
-  
-  IdArray send_sizes, send_offset;
-  Cluster(rank, seeds, min_vids, world_size, &send_sizes, &send_offset);
-  if(context->enable_profiler) {
-    CUDACHECK(cudaStreamSynchronize(s));
-    context->profiler->UpdateDSSamplingNvlinkCount(send_offset, fanout);
+  // Initialize the persistent sampler if it's not already initialized
+  if (!context->persistent_sampler_initialized) {
+    InitializePersistentSampler(context, min_vids, world_size);
+    context->persistent_sampler_initialized = true;
   }
 
-  IdArray frontier, recv_offset;
-  std::tie(frontier, recv_offset) = Alltoall(seeds, send_offset, 1, rank, world_size);
+  // Submit the sampling task to the persistent sampler
+  auto future = SubmitSamplingTask(seeds, is_local, fanout, bias, weight);
 
-  ConvertGidToLid(frontier, min_vids, rank);
-  auto neighbors = SampleNeighbors(frontier, fanout, weight, bias);
-  
-  IdArray reshuffled_neighbors, reshuffle_recv_offset;
-  std::tie(reshuffled_neighbors, reshuffle_recv_offset) = Alltoall(neighbors, recv_offset, fanout, rank, world_size, send_offset);
+  // Wait for the result
+  auto reshuffled_neighbors = WaitForSamplingResult(future);
 
+  // Create the subgraph from the sampled neighbors
   HeteroGraphPtr subg = CreateCOO(num_vertices, seeds, fanout, reshuffled_neighbors);
   
   List<ObjectRef> ret;
   ret.push_back(HeteroGraphRef(subg));
   ret.push_back(Value(MakeValue(seeds)));
   *rv = ret;
-  // *rv = HeteroGraphRef(subg);
+
+  // Make sure all operations are completed
   CUDACHECK(cudaStreamSynchronize(s));
 });
 
