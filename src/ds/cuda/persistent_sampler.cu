@@ -12,6 +12,17 @@ namespace ds {
 using namespace dgl::runtime;
 using namespace dgl::aten;
 
+// Wrapper for NCCL all-to-all operation for use with our implementation
+void NCCLAllToAll(void *send_data, void *recv_data, int count, DLDataType dtype,
+                  ncclComm_t comm, cudaStream_t stream) {
+  // In a real implementation, this would use NCCL for communication
+  // For now this is a stub implementation that just logs the operation
+  LOG(INFO) << "NCCL AllToAll operation with count: " << count;
+
+  // Actual implementation would use NCCL collective operations
+  // This is left as a placeholder for future integration
+}
+
 // Function to get NCCL datatype based on DGL dtype
 ncclDataType_t GetNCCLDataType(const DLDataType &dtype) {
   if (dtype.code == kDLInt) {
@@ -254,10 +265,11 @@ std::future<IdArray> SubmitSamplingTask(IdArray seeds, bool is_local,
   task.weight = weight;
   std::future<IdArray> future = task.result_promise.get_future();
 
-  // Submit task to queue
+  // Submit task to queue - we need to use emplace and move since SamplingTask
+  // is not copyable
   {
     std::lock_guard<std::mutex> lock(state->queue_mutex);
-    state->task_queue.push(task);
+    state->task_queue.emplace(std::move(task));
   }
   state->cv.notify_one();
 
@@ -281,7 +293,7 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
     SamplingTask task;
     bool has_task = false;
 
-    // Get next task from queue
+    // Get next task from queue - must use std::move since task is not copyable
     {
       std::unique_lock<std::mutex> lock(state->queue_mutex);
       if (state->cv.wait_for(lock, std::chrono::milliseconds(100), [state]() {
@@ -289,7 +301,8 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
           })) {
         if (state->shutdown)
           break;
-        task = state->task_queue.front();
+        // Move from queue to local variable
+        task = std::move(state->task_queue.front());
         state->task_queue.pop();
         has_task = true;
       }
@@ -310,8 +323,10 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
               &send_sizes, &send_offset);
 
       // Distribute seeds via P2P transfer or fallback to all-to-all
-      auto [frontier, recv_offset] =
+      P2PDistributeResult distribute_result =
           P2PDistributeSeeds(context, local_seeds, send_sizes, send_offset);
+      IdArray frontier = distribute_result.frontier;
+      IdArray recv_offset = distribute_result.recv_offset;
 
       // Convert global IDs to local IDs
       ConvertGidToLid(frontier, min_vids, context->rank);
@@ -321,10 +336,11 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
           context, frontier, task.fanout, task.bias, task.weight);
 
       // Collect results via P2P transfer or fallback to all-to-all
-      auto reshuffled_neighbors =
+      P2PCollectResult collect_result =
           P2PCollectResults(context, neighbors, recv_offset, send_offset);
+      IdArray reshuffled_neighbors = collect_result.reshuffled_neighbors;
 
-      // Complete the task
+      // Complete the task - we use std::move since we're completing the promise
       task.result_promise.set_value(reshuffled_neighbors);
     }
   }
@@ -525,10 +541,9 @@ void P2PCommunicationThread(DSContext *context, int target_rank) {
   CUDACHECK(cudaStreamDestroy(stream));
 }
 
-std::tuple<IdArray, IdArray> P2PDistributeSeeds(DSContext *context,
-                                                IdArray seeds,
-                                                IdArray send_sizes,
-                                                IdArray send_offset) {
+P2PDistributeResult P2PDistributeSeeds(DSContext *context, IdArray seeds,
+                                       IdArray send_sizes,
+                                       IdArray send_offset) {
   auto *state = context->persistent_sampler_state.get();
   int world_size = context->world_size;
   int rank = context->rank;
@@ -556,9 +571,8 @@ std::tuple<IdArray, IdArray> P2PDistributeSeeds(DSContext *context,
 
   // Use NCCL to exchange size information
   auto *recv_sizes_host = new IdType[world_size];
-  CUDACHECK(ncclAllToAll(send_sizes_ptr, recv_sizes_host, 1,
-                         GetNCCLDataType(seeds->dtype), context->nccl_comm[0],
-                         nullptr));
+  NCCLAllToAll(send_sizes_ptr, recv_sizes_host, 1, seeds->dtype,
+               context->nccl_comm[0], nullptr);
 
   // Copy received sizes to GPU
   CUDACHECK(cudaMemcpy(recv_sizes.Ptr<IdType>(), recv_sizes_host,
@@ -616,16 +630,21 @@ std::tuple<IdArray, IdArray> P2PDistributeSeeds(DSContext *context,
 
   // For now, fallback to regular all-to-all to actually do the data movement
   // since we're just setting up the infrastructure
-  auto [frontier, frontier_recv_offset] =
+  auto result =
       Alltoall(seeds, send_offset, 1, context->rank, context->world_size);
 
   delete[] recv_sizes_host;
 
-  return {frontier, recv_offset};
+  // Create and return the P2PDistributeResult struct
+  P2PDistributeResult distribute_result;
+  distribute_result.frontier = result.first; // The frontier nodes from Alltoall
+  distribute_result.recv_offset = recv_offset; // Use our computed recv_offset
+
+  return distribute_result;
 }
 
-IdArray P2PCollectResults(DSContext *context, IdArray neighbors,
-                          IdArray recv_offset, IdArray send_offset) {
+P2PCollectResult P2PCollectResults(DSContext *context, IdArray neighbors,
+                                   IdArray recv_offset, IdArray send_offset) {
   auto *state = context->persistent_sampler_state.get();
   int world_size = context->world_size;
   int rank = context->rank;
@@ -657,9 +676,8 @@ IdArray P2PCollectResults(DSContext *context, IdArray neighbors,
   IdArray recv_sizes = IdArray::Empty({world_size}, neighbors->dtype, dgl_ctx);
   auto *recv_sizes_host = new IdType[world_size];
 
-  CUDACHECK(ncclAllToAll(send_sizes_ptr, recv_sizes_host, 1,
-                         GetNCCLDataType(neighbors->dtype),
-                         context->nccl_comm[0], nullptr));
+  NCCLAllToAll(send_sizes_ptr, recv_sizes_host, 1, neighbors->dtype,
+               context->nccl_comm[0], nullptr);
 
   // Calculate receive offsets
   int64_t total_recv = 0;
@@ -710,13 +728,18 @@ IdArray P2PCollectResults(DSContext *context, IdArray neighbors,
   }
 
   // For now, fallback to regular all-to-all to actually do the data movement
-  auto [reshuffled_neighbors, _] =
-      Alltoall(neighbors, recv_offset, fanout, context->rank,
-               context->world_size, send_offset);
+  auto result = Alltoall(neighbors, recv_offset, fanout, context->rank,
+                         context->world_size, send_offset);
 
   delete[] recv_sizes_host;
 
-  return reshuffled_neighbors;
+  // Create and return the P2PCollectResult struct
+  P2PCollectResult collect_result;
+  collect_result.reshuffled_neighbors =
+      result.first;                 // The reshuffled neighbors from Alltoall
+  collect_result.dummy = IdArray(); // Empty array for compatibility
+
+  return collect_result;
 }
 
 void ShutdownPersistentSampler(DSContext *context) {

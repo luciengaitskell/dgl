@@ -77,6 +77,18 @@ struct PersistentSamplerState {
   int max_tasks{32};
 };
 
+// Define a custom wrapper for the P2P distribute seeds return value
+struct P2PDistributeResult {
+  IdArray frontier;
+  IdArray recv_offset;
+};
+
+// Define a custom wrapper for the P2P collect results return value
+struct P2PCollectResult {
+  IdArray reshuffled_neighbors;
+  IdArray dummy; // Not used but needed for compatibility
+};
+
 // Initialize the persistent sampler
 void InitializePersistentSampler(DSContext *context, IdArray min_vids,
                                  int world_size);
@@ -100,14 +112,12 @@ void P2PCommunicationThread(DSContext *context, int target_rank);
 void LaunchPersistentSamplingKernel(DSContext *context, cudaStream_t stream);
 
 // Distribute seeds via P2P transfer
-std::tuple<IdArray, IdArray> P2PDistributeSeeds(DSContext *context,
-                                                IdArray seeds,
-                                                IdArray send_sizes,
-                                                IdArray send_offset);
+P2PDistributeResult P2PDistributeSeeds(DSContext *context, IdArray seeds,
+                                       IdArray send_sizes, IdArray send_offset);
 
 // Collect results via P2P transfer
-IdArray P2PCollectResults(DSContext *context, IdArray neighbors,
-                          IdArray recv_offset, IdArray send_offset);
+P2PCollectResult P2PCollectResults(DSContext *context, IdArray neighbors,
+                                   IdArray recv_offset, IdArray send_offset);
 
 // Process seeds in the persistent kernel
 IdArray ProcessSeedsInPersistentKernel(DSContext *context, IdArray frontier,
