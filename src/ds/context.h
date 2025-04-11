@@ -86,8 +86,8 @@ struct DSContext {
   // Persistent kernel variables
   IdArray task_flags;
   IdArray task_counts;
-  IdType **task_seeds = nullptr;
-  IdType **task_results = nullptr;
+  int64_t **task_seeds = nullptr;   // Using int64_t instead of IdType
+  int64_t **task_results = nullptr; // Using int64_t instead of IdType
   int *task_fanouts = nullptr;
   bool *task_bias_flags = nullptr;
   uint32_t **task_weights = nullptr;

@@ -20,15 +20,7 @@
 #include <dgl/array.h>
 #include <dgl/aten/csr.h>
 
-// Define types before including context.h
-namespace dgl {
-namespace ds {
-using IdType = int64_t;
-using DataType = float;
-} // namespace ds
-} // namespace dgl
-
-// Include context after type definitions
+// Include context
 #include "../context.h"
 
 namespace dgl {
