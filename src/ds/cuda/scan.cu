@@ -251,8 +251,8 @@ std::pair<IdArray, IdArray> MultiWayScan(IdArray input, IdArray part_offset,
 
   if (input->shape[0] == 0) {
     LOG(INFO) << "[MultiWayScan] Empty input array, returning null arrays";
-    return {NullArray(input->dtype, input->ctx),
-            NullArray(input->dtype, input->ctx)};
+    return {IdArray::Empty({0}, input->dtype, input->ctx),
+            IdArray::Empty({0}, input->dtype, input->ctx)};
   }
 
   // Validate input parameters
