@@ -99,23 +99,124 @@ __global__ void _ScanAddKernel(IdType *workspace, IdType *sums, int size,
 
 void _MultiWayScanRecursive(IdType *workspace, int size, IdType *part_ids,
                             int world_size, DeviceAPI *device, DGLContext ctx) {
+  // Calculate the number of blocks needed
   int n_blocks = (size + ELE_PER_BLOCK - 1) / ELE_PER_BLOCK;
+  LOG(INFO) << "[_MultiWayScanRecursive] Processing size=" << size
+            << ", blocks=" << n_blocks << ", world_size=" << world_size;
+
+  // Limit recursion depth to prevent stack overflow
+  static int recursion_depth = 0;
+  const int MAX_RECURSION_DEPTH = 10;
+  recursion_depth++;
+
+  if (recursion_depth > MAX_RECURSION_DEPTH) {
+    LOG(WARNING) << "[_MultiWayScanRecursive] Max recursion depth reached, "
+                    "terminating recursion";
+    recursion_depth--;
+    return;
+  }
+
   IdType *sums = nullptr;
   if (size > ELE_PER_BLOCK) {
-    sums = (IdType *)device->AllocWorkspace(ctx, world_size * n_blocks *
-                                                     sizeof(IdType));
+    size_t sums_size = world_size * n_blocks * sizeof(IdType);
+    try {
+      LOG(INFO) << "[_MultiWayScanRecursive] Allocating sums array of size "
+                << (sums_size / 1024) << " KB";
+      sums = (IdType *)device->AllocWorkspace(ctx, sums_size);
+      if (sums == nullptr) {
+        LOG(ERROR) << "[_MultiWayScanRecursive] Failed to allocate sums memory";
+        recursion_depth--;
+        return;
+      }
+
+      // Initialize sums to zero
+      cudaError_t cuda_err = cudaMemset(sums, 0, sums_size);
+      if (cuda_err != cudaSuccess) {
+        LOG(ERROR) << "[_MultiWayScanRecursive] Failed to initialize sums: "
+                   << cudaGetErrorString(cuda_err);
+        device->FreeWorkspace(ctx, sums);
+        recursion_depth--;
+        return;
+      }
+    } catch (const std::exception &e) {
+      LOG(ERROR)
+          << "[_MultiWayScanRecursive] Exception during sums allocation: "
+          << e.what();
+      recursion_depth--;
+      return;
+    }
   }
+
+  // Configure grid and blocks
   const dim3 grid(world_size, n_blocks);
   auto *thr_entry = CUDAThreadEntry::ThreadLocal();
+
+  // Launch scan kernel with error checking
+  LOG(INFO)
+      << "[_MultiWayScanRecursive] Launching _MultiWayCtaScanKernel with grid=("
+      << grid.x << "," << grid.y << "), threads=" << THREADS_PER_BLOCK;
+
   _MultiWayCtaScanKernel<<<grid, THREADS_PER_BLOCK, 0, thr_entry->stream>>>(
       workspace, size, part_ids, world_size, sums);
+
+  // Check for kernel launch errors
+  cudaError_t cuda_err = cudaGetLastError();
+  if (cuda_err != cudaSuccess) {
+    LOG(ERROR)
+        << "[_MultiWayScanRecursive] CUDA error in _MultiWayCtaScanKernel: "
+        << cudaGetErrorString(cuda_err);
+    if (sums != nullptr) {
+      device->FreeWorkspace(ctx, sums);
+    }
+    recursion_depth--;
+    return;
+  }
+
+  // Ensure kernel completion before proceeding
+  cuda_err = cudaStreamSynchronize(thr_entry->stream);
+  if (cuda_err != cudaSuccess) {
+    LOG(ERROR) << "[_MultiWayScanRecursive] CUDA sync error: "
+               << cudaGetErrorString(cuda_err);
+    if (sums != nullptr) {
+      device->FreeWorkspace(ctx, sums);
+    }
+    recursion_depth--;
+    return;
+  }
+
+  // Recursive step if needed
   if (size > ELE_PER_BLOCK) {
+    LOG(INFO) << "[_MultiWayScanRecursive] Recursing with n_blocks="
+              << n_blocks;
     _MultiWayScanRecursive(sums, n_blocks, nullptr, world_size, device, ctx);
-    auto *thr_entry = CUDAThreadEntry::ThreadLocal();
+
+    LOG(INFO)
+        << "[_MultiWayScanRecursive] Launching _ScanAddKernel after recursion";
     _ScanAddKernel<<<grid, THREADS_PER_BLOCK * 2, 0, thr_entry->stream>>>(
         workspace, sums, size, world_size);
+
+    // Check for kernel errors
+    cuda_err = cudaGetLastError();
+    if (cuda_err != cudaSuccess) {
+      LOG(ERROR) << "[_MultiWayScanRecursive] CUDA error in _ScanAddKernel: "
+                 << cudaGetErrorString(cuda_err);
+    } else {
+      // Ensure kernel completion
+      cuda_err = cudaStreamSynchronize(thr_entry->stream);
+      if (cuda_err != cudaSuccess) {
+        LOG(ERROR)
+            << "[_MultiWayScanRecursive] CUDA sync error after _ScanAddKernel: "
+            << cudaGetErrorString(cuda_err);
+      }
+    }
+
+    // Clean up memory
+    LOG(INFO) << "[_MultiWayScanRecursive] Freeing sums memory";
     device->FreeWorkspace(ctx, sums);
   }
+
+  LOG(INFO) << "[_MultiWayScanRecursive] Completed for size=" << size;
+  recursion_depth--;
 }
 
 __global__ void _PermutateKernel(IdType *workspace, IdType *input,
@@ -145,26 +246,127 @@ static void _Permutate(IdType *workspace, IdType *input, IdType *part_offset,
 
 std::pair<IdArray, IdArray> MultiWayScan(IdArray input, IdArray part_offset,
                                          IdArray part_ids, int world_size) {
+  LOG(INFO) << "[MultiWayScan] Starting with input size=" << input->shape[0]
+            << ", world_size=" << world_size;
+
   if (input->shape[0] == 0) {
+    LOG(INFO) << "[MultiWayScan] Empty input array, returning null arrays";
     return {NullArray(input->dtype, input->ctx),
             NullArray(input->dtype, input->ctx)};
   }
+
+  // Validate input parameters
+  if (world_size <= 0) {
+    LOG(WARNING) << "[MultiWayScan] Invalid world_size=" << world_size
+                 << ", using world_size=1";
+    world_size = 1;
+  }
+
   int size = input->shape[0];
   auto device = DeviceAPI::Get(input->ctx);
+
+  // Check if part_ids matches input size
+  if (part_ids->shape[0] != size) {
+    LOG(ERROR) << "[MultiWayScan] part_ids size (" << part_ids->shape[0]
+               << ") doesn't match input size (" << size << ")";
+    // Return original array and sequential index as fallback
+    IdArray index = Range(0, size, 1, input->dtype, input->ctx);
+    return {input, index};
+  }
+
+  // Check if part_offset has correct size
+  if (part_offset->shape[0] != world_size + 1) {
+    LOG(ERROR) << "[MultiWayScan] part_offset size (" << part_offset->shape[0]
+               << ") doesn't match expected size (" << (world_size + 1) << ")";
+    // Return original array and sequential index as fallback
+    IdArray index = Range(0, size, 1, input->dtype, input->ctx);
+    return {input, index};
+  }
+
+  // Calculate and check workspace size
   size_t workspace_size = world_size * size * sizeof(IdType);
-  IdType *workspace =
-      (IdType *)device->AllocWorkspace(input->ctx, workspace_size);
-  _MultiWayScanRecursive(workspace, size, part_ids.Ptr<IdType>(), world_size,
-                         device, input->ctx);
+  LOG(INFO) << "[MultiWayScan] Allocating workspace of size "
+            << (workspace_size / (1024 * 1024)) << " MB";
 
-  IdArray sorted = IdArray::Empty({input->shape[0]}, input->dtype, input->ctx);
-  IdArray index = IdArray::Empty({input->shape[0]}, input->dtype, input->ctx);
+  // Limit workspace size and handle large inputs more safely
+  const size_t MAX_WORKSPACE_SIZE = 4ULL * 1024 * 1024 * 1024; // 4GB limit
+  if (workspace_size > MAX_WORKSPACE_SIZE) {
+    LOG(WARNING) << "[MultiWayScan] Requested workspace size exceeds limit, "
+                    "falling back to simple sorting";
+    // Return sorted array as fallback
+    return Sort(input);
+  }
 
-  _Permutate(workspace, input.Ptr<IdType>(), part_offset.Ptr<IdType>(),
-             part_ids.Ptr<IdType>(), size, world_size, sorted.Ptr<IdType>(),
-             index.Ptr<IdType>());
-  device->FreeWorkspace(input->ctx, workspace);
-  return {sorted, index};
+  // Allocate workspace with error checking
+  IdType *workspace = nullptr;
+  try {
+    workspace = (IdType *)device->AllocWorkspace(input->ctx, workspace_size);
+    if (workspace == nullptr) {
+      throw std::runtime_error("Failed to allocate workspace memory");
+    }
+    LOG(INFO) << "[MultiWayScan] Workspace allocated successfully";
+  } catch (const std::exception &e) {
+    LOG(ERROR) << "[MultiWayScan] Workspace allocation failed: " << e.what()
+               << ", falling back to simple sorting";
+    return Sort(input);
+  }
+
+  // Initialize workspace to zero
+  cudaError_t cuda_err = cudaMemset(workspace, 0, workspace_size);
+  if (cuda_err != cudaSuccess) {
+    LOG(ERROR) << "[MultiWayScan] Failed to initialize workspace: "
+               << cudaGetErrorString(cuda_err);
+    device->FreeWorkspace(input->ctx, workspace);
+    return Sort(input);
+  }
+
+  // Perform the scan with careful error handling
+  try {
+    LOG(INFO) << "[MultiWayScan] Starting recursive scan";
+    _MultiWayScanRecursive(workspace, size, part_ids.Ptr<IdType>(), world_size,
+                           device, input->ctx);
+
+    // Create output arrays
+    IdArray sorted = IdArray::Empty({size}, input->dtype, input->ctx);
+    IdArray index = IdArray::Empty({size}, input->dtype, input->ctx);
+
+    // Check for CUDA errors after scan
+    cuda_err = cudaGetLastError();
+    if (cuda_err != cudaSuccess) {
+      throw std::runtime_error(std::string("CUDA error after scan: ") +
+                               cudaGetErrorString(cuda_err));
+    }
+
+    LOG(INFO) << "[MultiWayScan] Scan complete, performing permutation";
+
+    // Permute the input based on scan results
+    _Permutate(workspace, input.Ptr<IdType>(), part_offset.Ptr<IdType>(),
+               part_ids.Ptr<IdType>(), size, world_size, sorted.Ptr<IdType>(),
+               index.Ptr<IdType>());
+
+    // Check for CUDA errors after permutation
+    cuda_err = cudaGetLastError();
+    if (cuda_err != cudaSuccess) {
+      throw std::runtime_error(std::string("CUDA error after permutation: ") +
+                               cudaGetErrorString(cuda_err));
+    }
+
+    // Synchronize to ensure all operations are complete
+    cudaDeviceSynchronize();
+
+    LOG(INFO) << "[MultiWayScan] Permutation complete, freeing workspace";
+    device->FreeWorkspace(input->ctx, workspace);
+
+    LOG(INFO) << "[MultiWayScan] Completed successfully";
+    return {sorted, index};
+  } catch (const std::exception &e) {
+    LOG(ERROR) << "[MultiWayScan] Error during scan: " << e.what()
+               << ", falling back to simple sorting";
+    if (workspace) {
+      device->FreeWorkspace(input->ctx, workspace);
+    }
+    return Sort(input);
+  }
 }
 
 } // namespace ds

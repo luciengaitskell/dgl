@@ -67,11 +67,19 @@ __global__ void _CountDeviceVerticesKernel(int device_cnt,
                                            IdType num_seed, const IdType *seeds,
                                            IdType *device_col_cnt,
                                            IdType *part_ids) {
+  // Ensure device parameters are valid
+  if (device_cnt <= 0 || device_vid_base == nullptr || seeds == nullptr ||
+      device_col_cnt == nullptr || part_ids == nullptr) {
+    return;
+  }
+
   __shared__ IdType local_count[9];
   __shared__ IdType device_vid[9];
+
   IdType idx = blockDim.x * blockIdx.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
 
+  // Load device vid bases into shared memory for faster access
   if (threadIdx.x <= device_cnt) {
     device_vid[threadIdx.x] = device_vid_base[threadIdx.x];
     local_count[threadIdx.x] = 0;
@@ -79,20 +87,30 @@ __global__ void _CountDeviceVerticesKernel(int device_cnt,
 
   __syncthreads();
 
+  // Process seeds and count how many belong to each device
   IdType device_id, vid;
   while (idx < num_seed) {
     device_id = 0;
     vid = seeds[idx];
+
+    // Find which device this seed belongs to
     while (device_id + 1 < device_cnt && device_vid[device_id + 1] <= vid) {
       ++device_id;
     }
+
+    // Record the device ID for this seed
     part_ids[idx] = device_id;
+
+    // Increment the count for this device
+    // Using atomicAdd to safely update shared memory from multiple threads
     atomicAdd((unsigned long long *)(local_count + device_id), 1);
+
     idx += stride;
   }
 
   __syncthreads();
 
+  // Atomically update the global counts for each device
   if (threadIdx.x < device_cnt) {
     atomicAdd((unsigned long long *)(device_col_cnt + threadIdx.x),
               local_count[threadIdx.x]);
@@ -185,7 +203,12 @@ IdArray Partition(IdArray seeds, IdArray min_vids) {
   }
 
   // Ensure all CUDA operations complete
-  cudaStreamSynchronize(thr_entry->stream);
+  cuda_err = cudaStreamSynchronize(thr_entry->stream);
+  if (cuda_err != cudaSuccess) {
+    LOG(ERROR) << "[PersistentSampler] CUDA synchronize error: "
+               << cudaGetErrorString(cuda_err);
+    return seeds; // Return original seeds on error
+  }
 
   LOG(INFO) << "[PersistentSampler] _CountDeviceVerticesKernel completed, "
                "calculating part_offset";
