@@ -12,6 +12,28 @@ namespace ds {
 using namespace dgl::runtime;
 using namespace dgl::aten;
 
+// Add a simple timer class for performance tracking
+class SamplerTimer {
+public:
+  SamplerTimer(const std::string &name)
+      : name_(name), start_(std::chrono::steady_clock::now()) {
+    LOG(INFO) << "[PersistentSampler] Starting: " << name_;
+  }
+
+  ~SamplerTimer() {
+    auto end = std::chrono::steady_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start_)
+            .count();
+    LOG(INFO) << "[PersistentSampler] Completed: " << name_ << " (" << duration
+              << "ms)";
+  }
+
+private:
+  std::string name_;
+  std::chrono::steady_clock::time_point start_;
+};
+
 // Wrapper for NCCL all-to-all operation for use with our implementation
 void NCCLAllToAll(void *send_data, void *recv_data, int count, DLDataType dtype,
                   ncclComm_t comm, cudaStream_t stream) {
@@ -166,8 +188,13 @@ __global__ void PersistentSamplingKernel(
 
 void InitializePersistentSampler(DSContext *context, IdArray min_vids,
                                  int world_size) {
+  LOG(INFO)
+      << "[PersistentSampler] Initializing persistent sampler with world_size="
+      << world_size << ", rank=" << context->rank;
+
   if (context->persistent_sampler_state &&
       context->persistent_sampler_state->initialized) {
+    LOG(INFO) << "[PersistentSampler] Already initialized, skipping";
     return;
   }
 
@@ -175,6 +202,9 @@ void InitializePersistentSampler(DSContext *context, IdArray min_vids,
   context->persistent_sampler_state =
       std::make_shared<PersistentSamplerState>();
   auto *state = context->persistent_sampler_state.get();
+
+  LOG(INFO)
+      << "[PersistentSampler] Initializing queues and synchronization objects";
 
   // Initialize queues for peer-to-peer communication
   state->p2p_send_queues.resize(world_size);
@@ -185,6 +215,9 @@ void InitializePersistentSampler(DSContext *context, IdArray min_vids,
     state->p2p_queue_mutexes.push_back(std::make_unique<std::mutex>());
     state->p2p_cvs.push_back(std::make_unique<std::condition_variable>());
   }
+
+  LOG(INFO) << "[PersistentSampler] Allocating GPU resources for "
+            << state->max_tasks << " task slots";
 
   // Allocate memory for task management
   context->task_flags = Full<int64_t>(0, state->max_tasks, min_vids->ctx);
@@ -205,42 +238,54 @@ void InitializePersistentSampler(DSContext *context, IdArray min_vids,
   CUDACHECK(cudaStreamCreate(&stream));
   context->persistent_kernel_stream = stream;
 
+  LOG(INFO) << "[PersistentSampler] Launching persistent kernel";
   LaunchPersistentSamplingKernel(context, stream);
 
   // Start worker thread for handling sampling tasks
+  LOG(INFO) << "[PersistentSampler] Starting worker threads";
   state->shutdown = false;
   context->sampler_thread = std::thread(SamplerWorkerThread, context, min_vids);
 
   // Start P2P communication threads (one per remote rank)
   for (int i = 0; i < world_size; i++) {
     if (i != context->rank) {
+      LOG(INFO) << "[PersistentSampler] Starting P2P thread for rank " << i;
       context->p2p_threads.push_back(
           std::thread(P2PCommunicationThread, context, i));
     }
   }
 
   // Enable peer access between GPUs if multiple GPUs on same node
-  // This is a simplified version - in practice would need to handle
-  // GPUs that can't directly access each other
+  LOG(INFO) << "[PersistentSampler] Setting up GPU peer access";
   for (int i = 0; i < world_size; i++) {
     if (i != context->rank) {
       int can_access = 0;
       CUDACHECK(cudaDeviceCanAccessPeer(&can_access, context->rank, i));
       if (can_access) {
+        LOG(INFO) << "[PersistentSampler] Enabling P2P access from rank "
+                  << context->rank << " to rank " << i;
         CUDACHECK(cudaDeviceEnablePeerAccess(i, 0));
+      } else {
+        LOG(INFO) << "[PersistentSampler] P2P access not available from rank "
+                  << context->rank << " to rank " << i;
       }
     }
   }
 
   state->initialized = true;
+  LOG(INFO) << "[PersistentSampler] Initialization complete";
 }
 
 void LaunchPersistentSamplingKernel(DSContext *context, cudaStream_t stream) {
+  LOG(INFO) << "[PersistentSampler] Configuring persistent CUDA kernel";
   auto *state = context->persistent_sampler_state.get();
 
   // Launch persistent kernel with configuration
   dim3 block(32, 8);           // 32 threads per warp, 8 warps per block
   dim3 grid(state->max_tasks); // One block per task slot
+
+  LOG(INFO) << "[PersistentSampler] Launching kernel with " << state->max_tasks
+            << " task slots, block size: " << block.x << "x" << block.y;
 
   PersistentSamplingKernel<<<grid, block, 0, stream>>>(
       context->task_flags.Ptr<IdType>(), context->task_counts.Ptr<IdType>(),
@@ -253,7 +298,14 @@ void LaunchPersistentSamplingKernel(DSContext *context, cudaStream_t stream) {
       context->adj_pos_map.Ptr<IdType>(), state->max_tasks);
 
   // Check for kernel launch errors
-  CUDACHECK(cudaGetLastError());
+  cudaError_t cuda_status = cudaGetLastError();
+  if (cuda_status != cudaSuccess) {
+    LOG(ERROR) << "[PersistentSampler] Kernel launch failed: "
+               << cudaGetErrorString(cuda_status);
+  } else {
+    LOG(INFO) << "[PersistentSampler] Kernel launched successfully";
+  }
+  CUDACHECK(cuda_status);
 }
 
 std::future<IdArray> SubmitSamplingTask(IdArray seeds, bool is_local,
@@ -282,17 +334,33 @@ std::future<IdArray> SubmitSamplingTask(IdArray seeds, bool is_local,
 }
 
 IdArray WaitForSamplingResult(std::future<IdArray> &future) {
-  // Wait for the result (with timeout for safety)
-  if (future.wait_for(std::chrono::seconds(30)) ==
-      std::future_status::timeout) {
-    LOG(FATAL) << "Sampling task timed out";
+  // Wait for the result with a longer timeout for complex graphs
+  auto timeout_duration =
+      std::chrono::seconds(300); // Increase from 30 to 300 seconds
+  auto status = future.wait_for(timeout_duration);
+
+  if (status == std::future_status::timeout) {
+    LOG(WARNING) << "Sampling task is taking longer than expected. "
+                 << "This may indicate a problem with the persistent kernel.";
+
+    // Try waiting a bit longer before giving up completely
+    status = future.wait_for(std::chrono::seconds(60));
+    if (status == std::future_status::timeout) {
+      LOG(FATAL) << "Sampling task timed out after "
+                 << (timeout_duration.count() + 60) << " seconds";
+    }
   }
+
   return future.get();
 }
 
 void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
   auto *state = context->persistent_sampler_state.get();
   CUDACHECK(cudaSetDevice(context->rank));
+
+  LOG(INFO) << "[PersistentSampler] Worker thread started on rank "
+            << context->rank;
+  int task_count = 0;
 
   while (!state->shutdown) {
     SamplingTask task;
@@ -314,41 +382,71 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
     }
 
     if (has_task) {
+      task_count++;
+      SamplerTimer timer("Task #" + std::to_string(task_count) + " - " +
+                         std::to_string(task.seeds->shape[0]) +
+                         " seeds, fanout=" + std::to_string(task.fanout));
+
+      LOG(INFO) << "[PersistentSampler] Processing task #" << task_count
+                << " with " << task.seeds->shape[0]
+                << " seeds and fanout=" << task.fanout;
+
       // Process local seeds
+      LOG(INFO) << "[PersistentSampler] Partitioning seeds";
       IdArray local_seeds;
       if (task.is_local) {
         local_seeds = Partition(task.seeds, min_vids);
+        LOG(INFO) << "[PersistentSampler] After partitioning: "
+                  << local_seeds->shape[0] << " local seeds";
       } else {
         local_seeds = task.seeds;
       }
 
       // Calculate seed distribution
+      LOG(INFO)
+          << "[PersistentSampler] Calculating seed distribution across ranks";
       IdArray send_sizes, send_offset;
       Cluster(context->rank, local_seeds, min_vids, context->world_size,
               &send_sizes, &send_offset);
 
       // Distribute seeds via P2P transfer or fallback to all-to-all
+      LOG(INFO) << "[PersistentSampler] Distributing seeds to ranks";
       P2PDistributeResult distribute_result =
           P2PDistributeSeeds(context, local_seeds, send_sizes, send_offset);
       IdArray frontier = distribute_result.frontier;
       IdArray recv_offset = distribute_result.recv_offset;
+      LOG(INFO) << "[PersistentSampler] Received frontier with "
+                << frontier->shape[0] << " seeds";
 
       // Convert global IDs to local IDs
+      LOG(INFO) << "[PersistentSampler] Converting global IDs to local IDs";
       ConvertGidToLid(frontier, min_vids, context->rank);
 
       // Process seeds in the persistent kernel
+      LOG(INFO) << "[PersistentSampler] Processing seeds in persistent kernel";
+      SamplerTimer kernel_timer("Kernel processing");
       auto neighbors = ProcessSeedsInPersistentKernel(
           context, frontier, task.fanout, task.bias, task.weight);
+      LOG(INFO) << "[PersistentSampler] Sampled " << neighbors->shape[0]
+                << " neighbors";
 
       // Collect results via P2P transfer or fallback to all-to-all
+      LOG(INFO) << "[PersistentSampler] Collecting results";
       P2PCollectResult collect_result =
           P2PCollectResults(context, neighbors, recv_offset, send_offset);
       IdArray reshuffled_neighbors = collect_result.reshuffled_neighbors;
+      LOG(INFO) << "[PersistentSampler] Collected "
+                << reshuffled_neighbors->shape[0] << " neighbors";
 
       // Complete the task - we use std::move since we're completing the promise
+      LOG(INFO) << "[PersistentSampler] Task #" << task_count << " completed";
       task.result_promise.set_value(reshuffled_neighbors);
     }
   }
+
+  LOG(INFO)
+      << "[PersistentSampler] Worker thread shutting down after processing "
+      << task_count << " tasks";
 }
 
 // Helper function to find a free task slot
@@ -376,6 +474,10 @@ int FindFreeTaskSlot(DSContext *context) {
 
 IdArray ProcessSeedsInPersistentKernel(DSContext *context, IdArray frontier,
                                        int fanout, bool bias, IdArray weight) {
+  SamplerTimer timer("ProcessSeedsInPersistentKernel - " +
+                     std::to_string(frontier->shape[0]) +
+                     " seeds, fanout=" + std::to_string(fanout));
+
   auto *state = context->persistent_sampler_state.get();
   const int n_frontier = frontier->shape[0];
   auto dgl_ctx = frontier->ctx;
@@ -385,18 +487,24 @@ IdArray ProcessSeedsInPersistentKernel(DSContext *context, IdArray frontier,
       IdArray::Empty({n_frontier * fanout}, frontier->dtype, dgl_ctx);
 
   // Find a free task slot
+  LOG(INFO) << "[PersistentSampler] Finding a free task slot...";
   int slot = FindFreeTaskSlot(context);
+  LOG(INFO) << "[PersistentSampler] Using task slot " << slot;
 
   // Allocate device memory for this task's seeds and results
+  LOG(INFO)
+      << "[PersistentSampler] Allocating device memory for seeds and results";
   IdType *d_seeds, *d_results;
   CUDACHECK(cudaMalloc(&d_seeds, n_frontier * sizeof(IdType)));
   CUDACHECK(cudaMalloc(&d_results, n_frontier * fanout * sizeof(IdType)));
 
   // Copy seeds to device
+  LOG(INFO) << "[PersistentSampler] Copying seeds to device memory";
   CUDACHECK(cudaMemcpy(d_seeds, frontier.Ptr<IdType>(),
                        n_frontier * sizeof(IdType), cudaMemcpyDeviceToDevice));
 
   // Copy pointers to kernel-accessible arrays
+  LOG(INFO) << "[PersistentSampler] Setting up task parameters";
   CUDACHECK(cudaMemcpy(context->task_seeds + slot, &d_seeds, sizeof(IdType *),
                        cudaMemcpyHostToDevice));
   CUDACHECK(cudaMemcpy(context->task_results + slot, &d_results,
@@ -409,6 +517,7 @@ IdArray ProcessSeedsInPersistentKernel(DSContext *context, IdArray frontier,
   // Handle weight array if biased sampling is enabled
   uint32_t *d_weight = nullptr;
   if (bias && !IsNullArray(weight)) {
+    LOG(INFO) << "[PersistentSampler] Setting up bias weights";
     CUDACHECK(cudaMalloc(&d_weight, weight->shape[0] * sizeof(uint32_t)));
     CUDACHECK(cudaMemcpy(d_weight, weight.Ptr<uint32_t>(),
                          weight->shape[0] * sizeof(uint32_t),
@@ -418,39 +527,78 @@ IdArray ProcessSeedsInPersistentKernel(DSContext *context, IdArray frontier,
                        sizeof(uint32_t *), cudaMemcpyHostToDevice));
 
   // Set count and flag atomically to signal task is ready
+  LOG(INFO) << "[PersistentSampler] Setting task count to " << n_frontier;
   CUDACHECK(cudaMemcpy(
       const_cast<IdType *>(context->task_counts.Ptr<IdType>() + slot),
       &n_frontier, sizeof(IdType), cudaMemcpyHostToDevice));
 
   // Set flag to 1 to indicate task is ready
+  LOG(INFO) << "[PersistentSampler] Setting task flag to ready (1)";
   IdType ready_flag = 1;
   CUDACHECK(
       cudaMemcpy(const_cast<IdType *>(context->task_flags.Ptr<IdType>() + slot),
                  &ready_flag, sizeof(IdType), cudaMemcpyHostToDevice));
 
   // Wait for task completion (flag set to 2)
+  LOG(INFO) << "[PersistentSampler] Waiting for kernel to process task...";
   IdType flag = 0;
+  int wait_attempts = 0;
+  auto start_time = std::chrono::steady_clock::now();
+
   while (flag != 2) {
+    if (++wait_attempts % 100 == 0) {
+      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - start_time)
+                         .count();
+      LOG(INFO)
+          << "[PersistentSampler] Still waiting for kernel completion after "
+          << elapsed << "ms, attempt " << wait_attempts;
+
+      // Check current flag status
+      CUDACHECK(cudaMemcpy(
+          &flag, const_cast<IdType *>(context->task_flags.Ptr<IdType>() + slot),
+          sizeof(IdType), cudaMemcpyDeviceToHost));
+      LOG(INFO) << "[PersistentSampler] Current flag value: " << flag;
+
+      // Periodically check GPU status while we're waiting
+      if (wait_attempts % 500 == 0) {
+        cudaDeviceProp prop;
+        CUDACHECK(cudaGetDeviceProperties(&prop, context->rank));
+        LOG(INFO) << "[PersistentSampler] GPU " << context->rank << " ("
+                  << prop.name << ") is processing the task";
+      }
+    }
+
     CUDACHECK(cudaMemcpy(
         &flag, const_cast<IdType *>(context->task_flags.Ptr<IdType>() + slot),
         sizeof(IdType), cudaMemcpyDeviceToHost));
+
     if (flag == 2)
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - start_time)
+                     .count();
+  LOG(INFO) << "[PersistentSampler] Kernel completed task after " << elapsed
+            << "ms";
+
   // Copy results back
+  LOG(INFO) << "[PersistentSampler] Copying results back from device";
   CUDACHECK(cudaMemcpy(neighbors.Ptr<IdType>(), d_results,
                        n_frontier * fanout * sizeof(IdType),
                        cudaMemcpyDeviceToDevice));
 
   // Free resources
+  LOG(INFO) << "[PersistentSampler] Cleaning up resources";
   CUDACHECK(cudaFree(d_seeds));
   CUDACHECK(cudaFree(d_results));
   if (d_weight)
     CUDACHECK(cudaFree(d_weight));
 
   // Reset task slot
+  LOG(INFO) << "[PersistentSampler] Resetting task slot";
   IdType zero = 0;
   CUDACHECK(
       cudaMemcpy(const_cast<IdType *>(context->task_flags.Ptr<IdType>() + slot),
