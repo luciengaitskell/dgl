@@ -109,6 +109,11 @@ __global__ void PersistentSamplingKernel(
     // Check for new task
     if (!active && task_flags[slot_id] == 1) {
       if (threadIdx.x == 0 && threadIdx.y == 0) {
+        // Set flag to processing immediately to prevent other blocks from
+        // taking this task
+        task_flags[slot_id] = 3; // 3 means processing
+
+        // Load task data
         n_seeds = task_counts[slot_id];
         seeds = task_seeds[slot_id];
         results = task_results[slot_id];
@@ -116,10 +121,6 @@ __global__ void PersistentSamplingKernel(
         use_bias = task_bias_flags[slot_id];
         weight = task_weights[slot_id];
         active = true;
-
-        // Debug signal that task was accepted
-        // This hack using a volatile location acts as a memory barrier
-        task_flags[slot_id] = 3; // 3 means processing
       }
       __syncthreads();
     }
@@ -149,7 +150,7 @@ __global__ void PersistentSamplingKernel(
         for (int pick = threadIdx.x; pick < fanout; pick += blockDim.x) {
           if (deg > 0) {
             int64_t edge;
-            if (use_bias) {
+            if (use_bias && weight != nullptr) {
               // Biased sampling with weight
               uint32_t val = curand(&rng) % deg;
               edge = binarySearch(weight, in_row_start, in_row_start + deg - 1,
@@ -179,7 +180,7 @@ __global__ void PersistentSamplingKernel(
     // Small sleep to prevent busy waiting
     if (!active) {
       clock_t start_clock = clock64();
-      clock_t clock_offset = 5000;
+      clock_t clock_offset = 500; // Reduced sleep time for faster response
       while (clock64() < start_clock + clock_offset) {
       }
     }
