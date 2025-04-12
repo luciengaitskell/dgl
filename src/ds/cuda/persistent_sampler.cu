@@ -393,27 +393,103 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
                 << " seeds and fanout=" << task.fanout;
 
       // Process local seeds
-      LOG(INFO) << "[PersistentSampler] Partitioning seeds";
+      LOG(INFO) << "[PersistentSampler] Partitioning seeds...";
       IdArray local_seeds;
-      if (task.is_local) {
-        local_seeds = Partition(task.seeds, min_vids);
-        LOG(INFO) << "[PersistentSampler] After partitioning: "
-                  << local_seeds->shape[0] << " local seeds";
-      } else {
-        local_seeds = task.seeds;
+      try {
+        if (task.is_local) {
+          LOG(INFO) << "[PersistentSampler] Calling Partition function with "
+                    << task.seeds->shape[0] << " seeds";
+
+          // Detailed info about the inputs to help debug
+          auto host_seeds = task.seeds.CopyTo(DLContext({kDLCPU, 0}));
+          auto host_min_vids = min_vids.CopyTo(DLContext({kDLCPU, 0}));
+          auto *seeds_ptr = host_seeds.Ptr<IdType>();
+          auto *min_vids_ptr = host_min_vids.Ptr<IdType>();
+
+          LOG(INFO) << "[PersistentSampler] First few seeds: "
+                    << (task.seeds->shape[0] > 0 ? std::to_string(seeds_ptr[0])
+                                                 : "none")
+                    << ", "
+                    << (task.seeds->shape[0] > 1 ? std::to_string(seeds_ptr[1])
+                                                 : "none")
+                    << ", "
+                    << (task.seeds->shape[0] > 2 ? std::to_string(seeds_ptr[2])
+                                                 : "none");
+
+          LOG(INFO) << "[PersistentSampler] First few min_vids: "
+                    << (min_vids->shape[0] > 0 ? std::to_string(min_vids_ptr[0])
+                                               : "none")
+                    << ", "
+                    << (min_vids->shape[0] > 1 ? std::to_string(min_vids_ptr[1])
+                                               : "none")
+                    << ", "
+                    << (min_vids->shape[0] > 2 ? std::to_string(min_vids_ptr[2])
+                                               : "none");
+
+          local_seeds = Partition(task.seeds, min_vids);
+          LOG(INFO) << "[PersistentSampler] After partitioning: "
+                    << local_seeds->shape[0] << " local seeds";
+        } else {
+          LOG(INFO) << "[PersistentSampler] Skipping partitioning since "
+                       "is_local=false";
+          local_seeds = task.seeds;
+        }
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during partitioning: "
+                   << e.what();
+        // Handle the error by completing the promise with an empty result
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
       }
 
       // Calculate seed distribution
       LOG(INFO)
           << "[PersistentSampler] Calculating seed distribution across ranks";
       IdArray send_sizes, send_offset;
-      Cluster(context->rank, local_seeds, min_vids, context->world_size,
-              &send_sizes, &send_offset);
+      try {
+        Cluster(context->rank, local_seeds, min_vids, context->world_size,
+                &send_sizes, &send_offset);
+
+        // Log the result of clustering
+        auto host_send_sizes = send_sizes.CopyTo(DLContext({kDLCPU, 0}));
+        auto host_send_offset = send_offset.CopyTo(DLContext({kDLCPU, 0}));
+        auto *send_sizes_ptr = host_send_sizes.Ptr<IdType>();
+        auto *send_offset_ptr = host_send_offset.Ptr<IdType>();
+
+        std::stringstream ss;
+        ss << "[PersistentSampler] Send sizes: ";
+        for (int i = 0; i < std::min(context->world_size, 4); i++) {
+          ss << send_sizes_ptr[i] << " ";
+        }
+        LOG(INFO) << ss.str();
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during clustering: "
+                   << e.what();
+        // Handle the error
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
+      }
 
       // Distribute seeds via P2P transfer or fallback to all-to-all
       LOG(INFO) << "[PersistentSampler] Distributing seeds to ranks";
-      P2PDistributeResult distribute_result =
-          P2PDistributeSeeds(context, local_seeds, send_sizes, send_offset);
+      P2PDistributeResult distribute_result;
+      try {
+        distribute_result =
+            P2PDistributeSeeds(context, local_seeds, send_sizes, send_offset);
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during seed distribution: "
+                   << e.what();
+        // Handle the error
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
+      }
+
       IdArray frontier = distribute_result.frontier;
       IdArray recv_offset = distribute_result.recv_offset;
       LOG(INFO) << "[PersistentSampler] Received frontier with "
@@ -421,20 +497,54 @@ void SamplerWorkerThread(DSContext *context, IdArray min_vids) {
 
       // Convert global IDs to local IDs
       LOG(INFO) << "[PersistentSampler] Converting global IDs to local IDs";
-      ConvertGidToLid(frontier, min_vids, context->rank);
+      try {
+        ConvertGidToLid(frontier, min_vids, context->rank);
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during ID conversion: "
+                   << e.what();
+        // Handle the error
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
+      }
 
       // Process seeds in the persistent kernel
       LOG(INFO) << "[PersistentSampler] Processing seeds in persistent kernel";
       SamplerTimer kernel_timer("Kernel processing");
-      auto neighbors = ProcessSeedsInPersistentKernel(
-          context, frontier, task.fanout, task.bias, task.weight);
+      IdArray neighbors;
+      try {
+        neighbors = ProcessSeedsInPersistentKernel(
+            context, frontier, task.fanout, task.bias, task.weight);
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during kernel processing: "
+                   << e.what();
+        // Handle the error
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
+      }
+
       LOG(INFO) << "[PersistentSampler] Sampled " << neighbors->shape[0]
                 << " neighbors";
 
       // Collect results via P2P transfer or fallback to all-to-all
       LOG(INFO) << "[PersistentSampler] Collecting results";
-      P2PCollectResult collect_result =
-          P2PCollectResults(context, neighbors, recv_offset, send_offset);
+      P2PCollectResult collect_result;
+      try {
+        collect_result =
+            P2PCollectResults(context, neighbors, recv_offset, send_offset);
+      } catch (const std::exception &e) {
+        LOG(ERROR) << "[PersistentSampler] Exception during result collection: "
+                   << e.what();
+        // Handle the error
+        IdArray empty_result =
+            IdArray::Empty({0}, task.seeds->dtype, task.seeds->ctx);
+        task.result_promise.set_value(empty_result);
+        continue;
+      }
+
       IdArray reshuffled_neighbors = collect_result.reshuffled_neighbors;
       LOG(INFO) << "[PersistentSampler] Collected "
                 << reshuffled_neighbors->shape[0] << " neighbors";

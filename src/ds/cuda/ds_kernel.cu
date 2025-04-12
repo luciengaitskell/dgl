@@ -124,26 +124,90 @@ Partition(IdArray seeds, IdArray min_vids, int world_size) {
 }
 
 IdArray Partition(IdArray seeds, IdArray min_vids) {
+  LOG(INFO) << "[PersistentSampler] Partition function started with "
+            << seeds->shape[0] << " seeds and " << min_vids->shape[0]
+            << " min_vids";
+
   auto dgl_ctx = seeds->ctx;
+
+  // Sanity check inputs
+  if (seeds->shape[0] == 0) {
+    LOG(INFO)
+        << "[PersistentSampler] Empty seeds array, returning empty result";
+    return IdArray::Empty({0}, seeds->dtype, dgl_ctx);
+  }
+
+  if (min_vids->shape[0] <= 1) {
+    LOG(WARNING) << "[PersistentSampler] Invalid min_vids array with size "
+                 << min_vids->shape[0];
+    return seeds; // Return original seeds if we can't partition properly
+  }
+
   int world_size = min_vids->shape[0] - 1;
+  LOG(INFO) << "[PersistentSampler] Partitioning for world_size=" << world_size;
+
   IdArray part_sizes = Full<int64_t>(0, world_size, dgl_ctx);
   IdArray part_ids =
       IdArray::Empty({seeds->shape[0]}, seeds->dtype, seeds->ctx);
+
   int n_threads = 1024;
   dim3 block(n_threads);
   dim3 grid((seeds->shape[0] + n_threads - 1) / n_threads);
   if (grid.x == 0)
     grid.x = 1;
+
+  LOG(INFO)
+      << "[PersistentSampler] Launching _CountDeviceVerticesKernel with grid="
+      << grid.x << ", block=" << block.x;
+
   KernelController::AdjustKernelSize(grid, block);
   auto *thr_entry = CUDAThreadEntry::ThreadLocal();
+
+  // Clear any previous CUDA errors
+  cudaError_t cuda_err = cudaGetLastError();
+  if (cuda_err != cudaSuccess) {
+    LOG(WARNING) << "[PersistentSampler] Clearing previous CUDA error: "
+                 << cudaGetErrorString(cuda_err);
+  }
+
+  // Launch the kernel with careful error checking
   _CountDeviceVerticesKernel<<<grid, block, 0, thr_entry->stream>>>(
       world_size, min_vids.Ptr<IdType>(), seeds->shape[0], seeds.Ptr<IdType>(),
       part_sizes.Ptr<IdType>(), part_ids.Ptr<IdType>());
+
+  // Check for kernel launch errors
+  cuda_err = cudaGetLastError();
+  if (cuda_err != cudaSuccess) {
+    LOG(ERROR)
+        << "[PersistentSampler] CUDA error in _CountDeviceVerticesKernel: "
+        << cudaGetErrorString(cuda_err);
+    return seeds; // Return original seeds on error
+  }
+
+  // Ensure all CUDA operations complete
+  cudaStreamSynchronize(thr_entry->stream);
+
+  LOG(INFO) << "[PersistentSampler] _CountDeviceVerticesKernel completed, "
+               "calculating part_offset";
+
+  // Calculate cumulative sum of part_sizes to get offsets
   IdArray part_offset = CumSum(part_sizes, true);
+
+  LOG(INFO)
+      << "[PersistentSampler] Calculated part_offset, running MultiWayScan";
+
+  // Use MultiWayScan to sort the seeds
   IdArray sorted, index;
-  std::tie(sorted, index) =
-      MultiWayScan(seeds, part_offset, part_ids, world_size);
-  // std::tie(sorted, index) = Sort(seeds);
+  try {
+    std::tie(sorted, index) =
+        MultiWayScan(seeds, part_offset, part_ids, world_size);
+    LOG(INFO) << "[PersistentSampler] MultiWayScan completed successfully with "
+              << sorted->shape[0] << " results";
+  } catch (const std::exception &e) {
+    LOG(ERROR) << "[PersistentSampler] Exception in MultiWayScan: " << e.what();
+    return seeds; // Return original seeds on error
+  }
+
   return sorted;
 }
 
