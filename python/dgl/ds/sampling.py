@@ -53,5 +53,16 @@ def csr_to_global_id(g, global_nid_map):
     g._graph = _CAPI_DGLDSCSRToGlobalId(g._graph, global_nid_map)
     return g
 
+def sampler_persistent_launch():
+    """
+    Launch the persistent sampler thread.
+    """
+    _CAPI_DGLDSSamplerPersistentLaunch()
+    
+def sampler_persistent_shutdown():
+    """
+    Shutdown the persistent sampler thread.
+    """
+    _CAPI_DGLDSSamplerPersistentShutdown()
 
 _init_api("dgl.ds.sampling")

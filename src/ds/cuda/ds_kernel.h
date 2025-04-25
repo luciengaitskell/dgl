@@ -1,13 +1,13 @@
 #ifndef DGL_DS_KERNEL_H_
 #define DGL_DS_KERNEL_H_
 
+#include "../../runtime/cuda/cuda_common.h"
+#include "cuda_utils.h"
+#include <dgl/array.h>
+#include <dgl/aten/csr.h>
 #include <nccl.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <dgl/array.h>
-#include <dgl/aten/csr.h>
-#include "../../runtime/cuda/cuda_common.h"
-#include "cuda_utils.h"
 
 using namespace dgl;
 using namespace dgl::aten;
@@ -21,6 +21,60 @@ namespace ds {
 const int WARP_SIZE = 32;
 const int BLOCK_SIZE = 8 * WARP_SIZE;
 const int BLOCK_NUM = 2;
+
+// Struct for a sampling request
+struct SamplerRequest {
+  int64_t *seeds; // device pointer to seed node ids
+  int num_seeds;  // number of seeds
+  int fanout;     // fanout for sampling
+  int job_id;     // job identifier
+};
+
+// Struct for a sampling result
+struct SamplerResult {
+  int64_t *neighbors; // device pointer to output neighbor ids
+  int num_neighbors;  // number of neighbors
+  int job_id;         // job identifier (matches request)
+};
+
+// Simple device-side ring buffer queue (single-producer, single-consumer)
+template <typename T, int Capacity> struct DeviceRingQueue {
+  T buffer[Capacity];
+  int head; // enqueue position
+  int tail; // dequeue position
+  __device__ void init() {
+    head = 0;
+    tail = 0;
+  }
+  __device__ bool push(const T &item) {
+    int next_head = (head + 1) % Capacity;
+    if (next_head == tail)
+      return false; // full
+    buffer[head] = item;
+    head = next_head;
+    return true;
+  }
+  __device__ bool pop(T *item) {
+    if (tail == head)
+      return false; // empty
+    *item = buffer[tail];
+    tail = (tail + 1) % Capacity;
+    return true;
+  }
+  __device__ bool empty() const { return head == tail; }
+  __device__ bool full() const { return ((head + 1) % Capacity) == tail; }
+};
+
+// Enqueue a sampling request to the device queue
+bool EnqueueSamplerRequest(const SamplerRequest &req, cudaStream_t stream = 0);
+
+// Try to dequeue a sampling result from the device queue
+bool DequeueSamplerResult(SamplerResult *res, cudaStream_t stream = 0);
+
+// Signal the persistent kernel to shut down
+void ShutdownPersistentSampler(cudaStream_t stream = 0);
+
+void LaunchPersistentSamplerKernel(cudaStream_t stream = 0);
 
 /**
  * @brief (inplace) Convert global nid to local nid
@@ -39,6 +93,9 @@ IdArray Partition(IdArray seeds, IdArray min_vids);
 void Cluster(int rank, IdArray seeds, IdArray min_vids, int world_size, IdArray* send_sizes, IdArray* send_offset);
 
 IdArray SampleNeighbors(IdArray frontier, int fanout, IdArray weight, bool bias);
+
+IdArray SampleNeighborsPersistent(IdArray frontier, int fanout, IdArray weight,
+                                  bool bias);
 
 void SampleNeighborsV2(IdArray frontier, CSRMatrix csr_mat, int fanout, IdArray* neighbors, IdArray* edges);
 

@@ -14,17 +14,111 @@
 #include <dgl/aten/csr.h>
 #include <dgl/runtime/device_api.h>
 
+#include "../context.h"
+#include "../kernel_controller.h"
 #include "../memory_manager.h"
 #include "./alltoall.h"
-#include "../context.h"
 #include "./scan.h"
-#include "../kernel_controller.h"
 
 using namespace dgl::runtime;
 using namespace dgl::aten;
 
 namespace dgl {
 namespace ds {
+
+// Example capacity for the queues
+constexpr int kSamplerQueueCapacity = 32;
+
+// Device global queues (for demo/prototype; in production, use per-GPU or
+// context)
+__device__ DeviceRingQueue<SamplerRequest, kSamplerQueueCapacity>
+    g_sampler_in_queue;
+__device__ DeviceRingQueue<SamplerResult, kSamplerQueueCapacity>
+    g_sampler_out_queue;
+
+// Persistent kernel for neighbor sampling
+__global__ void PersistentSamplerKernel() {
+  // Initialize queues (only once per kernel launch)
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    g_sampler_in_queue.init();
+    g_sampler_out_queue.init();
+  }
+  __syncthreads();
+
+  while (true) {
+    // Only one thread handles the queue for simplicity (can be extended)
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+      SamplerRequest req;
+      if (g_sampler_in_queue.pop(&req)) {
+        // Check for shutdown signal (e.g., job_id == -1)
+        if (req.job_id == -1) {
+          break;
+        }
+        // TODO: Call actual sampling logic here (replace with real kernel)
+        // For now, just echo back the request as a dummy result
+        SamplerResult res;
+        res.neighbors = req.seeds;         // placeholder
+        res.num_neighbors = req.num_seeds; // placeholder
+        res.job_id = req.job_id;
+        // Push result to output queue
+        while (!g_sampler_out_queue.push(res)) {
+          // Busy-wait until space is available
+        }
+      }
+    }
+    __syncthreads();
+  }
+}
+
+// Kernel to push a request to the device queue
+template <int Capacity>
+__global__ void PushSamplerRequestKernel(const SamplerRequest req) {
+  g_sampler_in_queue.push(req);
+}
+
+// Kernel to pop a result from the device queue
+__global__ void PopSamplerResultKernel(SamplerResult *res, bool *success) {
+  *success = g_sampler_out_queue.pop(res);
+}
+
+bool EnqueueSamplerRequest(const SamplerRequest &req, cudaStream_t stream) {
+  // Launch a kernel to push the request to the device queue
+  PushSamplerRequestKernel<kSamplerQueueCapacity><<<1, 1, 0, stream>>>(req);
+  cudaError_t err = cudaGetLastError();
+  return err == cudaSuccess;
+}
+
+bool DequeueSamplerResult(SamplerResult *res, cudaStream_t stream) {
+  // Allocate device-side result and flag
+  SamplerResult *d_res;
+  bool *d_success;
+  cudaMalloc(&d_res, sizeof(SamplerResult));
+  cudaMalloc(&d_success, sizeof(bool));
+  // Launch kernel to pop from device queue
+  PopSamplerResultKernel<<<1, 1, 0, stream>>>(d_res, d_success);
+  bool h_success = false;
+  cudaMemcpy(&h_success, d_success, sizeof(bool), cudaMemcpyDeviceToHost);
+  if (h_success) {
+    cudaMemcpy(res, d_res, sizeof(SamplerResult), cudaMemcpyDeviceToHost);
+  }
+  cudaFree(d_res);
+  cudaFree(d_success);
+  return h_success;
+}
+
+void ShutdownPersistentSampler(cudaStream_t stream) {
+  SamplerRequest shutdown_req;
+  shutdown_req.job_id = -1;
+  shutdown_req.seeds = nullptr;
+  shutdown_req.num_seeds = 0;
+  shutdown_req.fanout = 0;
+  EnqueueSamplerRequest(shutdown_req, stream);
+}
+
+// Host-side launcher for the persistent kernel
+void LaunchPersistentSamplerKernel(cudaStream_t stream) {
+  PersistentSamplerKernel<<<1, 32, 0, stream>>>();
+}
 
 __global__
 void _GidToLidKernel(IdType* global_ids, size_t size, IdType* min_vids, int rank) {
@@ -530,6 +624,27 @@ IdArray SampleNeighbors(IdArray frontier, int fanout, IdArray weight=aten::NullA
   }
   // CUDACHECK(cudaDeviceSynchronize());
   return neighbors;
+}
+
+IdArray SampleNeighborsPersistent(IdArray frontier, int fanout,
+                                  IdArray weight = aten::NullArray(),
+                                  bool bias = false) {
+  // For now, only support the basic case: no weights, no bias
+  // (Extend as needed for your use case)
+  dgl::ds::SamplerRequest req;
+  req.seeds = frontier.Ptr<int64_t>();
+  req.num_seeds = frontier->shape[0];
+  req.fanout = fanout;
+  req.job_id = 0; // Could use a unique id if needed
+  dgl::ds::EnqueueSamplerRequest(req);
+  dgl::ds::SamplerResult res;
+  // Busy-wait for result (could add timeout or yield)
+  while (!dgl::ds::DequeueSamplerResult(&res)) {
+  }
+  // Wrap the result in an IdArray (assume neighbors are int64_t)
+  // For prototype, just return a view on the same memory
+  // In production, copy to a new IdArray as needed
+  return frontier;
 }
 
 IdArray SampleNeighborsV2(IdArray frontier, CSRMatrix csr_mat, int fanout) {

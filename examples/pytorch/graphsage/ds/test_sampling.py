@@ -78,6 +78,9 @@ class NeighborSampler(object):
 
 def run(rank, args):
     setup(rank, args.n_ranks)
+    # Launch persistent sampler kernel if enabled
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_launch()
     ds.init(rank, args.n_ranks, enable_comm_control=False, enable_profiler=args.enable_profiler)
     
     # load partitioned graph
@@ -173,6 +176,9 @@ def run(rank, args):
 
     if rank == 0:
         print("rank:", rank, 'world_size: ', args.n_ranks, "sampling time:", total/(args.num_epochs - skip_epoch))
+    
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_shutdown()
     cleanup()
   
 
@@ -199,4 +205,4 @@ if __name__ == '__main__':
           args=(args,),
           nprocs=args.n_ranks,
           join=True)
-  
+

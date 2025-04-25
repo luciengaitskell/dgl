@@ -221,6 +221,10 @@ def run(rank, args):
     ds.init(rank, args.n_ranks, thread_num=sampler_number +
             loader_number, enable_kernel_control=False)
 
+    # Launch persistent sampler kernel if enabled
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_launch()
+
     # load partitioned graph
     g, node_feats, edge_feats, gpb, _, _, _ = dgl.distributed.load_partition(
         args.part_config, rank)
@@ -418,14 +422,10 @@ def run(rank, args):
     for i in range(loader_number):
         load_workers[i].join()
     monitor.join()
-    if rank == 0:
-        print("array len:", len(time_array), len(acc_array), len(loss_array))
-        with open("pipeline_paper_curve.txt", 'w') as file:
-            for i in range(len(time_array)):
-                file.write(str(time_array[i]) + ' ')
-                file.write(str(acc_array[i]) + ' ')
-                file.write(str(loss_array[i]) + '\n')
-            file.close()
+    
+    # At the end, before cleanup
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_shutdown()
     cleanup()
 
 
