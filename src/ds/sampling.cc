@@ -71,6 +71,7 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
   bool use_persistent_sampler =
       std::getenv("DGL_DS_USE_PERSISTENT_SAMPLER") != nullptr;
 
+  LOG(INFO) << "use_persistent_sampler: " << use_persistent_sampler;
   int n_seeds = seeds->shape[0];
   int rank = context->rank;
   int world_size = context->world_size;

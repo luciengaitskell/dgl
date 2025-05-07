@@ -40,23 +40,34 @@ __device__ DeviceRingQueue<SamplerRequest, kSamplerQueueCapacity>
     g_sampler_in_queue;
 __device__ DeviceRingQueue<SamplerResult, kSamplerQueueCapacity>
     g_sampler_out_queue;
+__device__ bool persistent_kernel_running = false;
 
 // Persistent kernel for neighbor sampling
 __global__ void PersistentSamplerKernel() {
   // Initialize queues (only once per kernel launch)
   if (threadIdx.x == 0 && blockIdx.x == 0) {
+    persistent_kernel_running = true;
     g_sampler_in_queue.init();
     g_sampler_out_queue.init();
+    printf("Persistent kernel initialized\n");
   }
   __syncthreads();
+  printf("Persistent kernel running\n");
 
-  while (true) {
+  int64_t count = 0;
+  while (persistent_kernel_running) {
+    count++;
     // Only one thread handles the queue for simplicity (can be extended)
     if (threadIdx.x == 0 && blockIdx.x == 0) {
       SamplerRequest req;
       if (g_sampler_in_queue.pop(&req)) {
+        printf("Processing request: job_id=%d, num_seeds=%d\n", req.job_id,
+               req.num_seeds);
+
         // Check for shutdown signal (e.g., job_id == -1)
         if (req.job_id == -1) {
+          printf("Shutdown signal received. Exiting persistent kernel.\n");
+          persistent_kernel_running = false;
           break;
         }
         // TODO: Call actual sampling logic here (replace with real kernel)
@@ -71,14 +82,23 @@ __global__ void PersistentSamplerKernel() {
         }
       }
     }
+
     __syncthreads();
+
+    // if (count >= 100000000) {
+    //   printf("Persistent kernel running for too long. Exiting.\n");
+    //   break; // let's cancel it
+    // }
   }
 }
 
 // Kernel to push a request to the device queue
 template <int Capacity>
 __global__ void PushSamplerRequestKernel(const SamplerRequest req) {
+  printf("Pushing request: job_id=%d, num_seeds=%d\n", req.job_id,
+         req.num_seeds);
   g_sampler_in_queue.push(req);
+  printf("Request pushed to queue\n");
 }
 
 // Kernel to pop a result from the device queue
@@ -88,20 +108,24 @@ __global__ void PopSamplerResultKernel(SamplerResult *res, bool *success) {
 
 bool EnqueueSamplerRequest(const SamplerRequest &req) {
   // Launch a kernel to push the request to the device queue
+  auto *thr_entry = CUDAThreadEntry::ThreadLocal();
+  LOG(INFO) << "Enqueueing request: job_id=" << req.job_id
+            << ", num_seeds=" << req.num_seeds;
   PushSamplerRequestKernel<kSamplerQueueCapacity>
-      <<<1, 1, 0, persistent_stream>>>(req);
+      <<<1, 1, 0, thr_entry->stream>>>(req);
   cudaError_t err = cudaGetLastError();
   return err == cudaSuccess;
 }
 
 bool DequeueSamplerResult(SamplerResult *res) {
   // Allocate device-side result and flag
+  auto *thr_entry = CUDAThreadEntry::ThreadLocal();
   SamplerResult *d_res;
   bool *d_success;
   cudaMalloc(&d_res, sizeof(SamplerResult));
   cudaMalloc(&d_success, sizeof(bool));
   // Launch kernel to pop from device queue
-  PopSamplerResultKernel<<<1, 1, 0, persistent_stream>>>(d_res, d_success);
+  PopSamplerResultKernel<<<1, 1, 0, thr_entry->stream>>>(d_res, d_success);
   bool h_success = false;
   cudaMemcpy(&h_success, d_success, sizeof(bool), cudaMemcpyDeviceToHost);
   if (h_success) {
@@ -113,16 +137,24 @@ bool DequeueSamplerResult(SamplerResult *res) {
 }
 
 void ShutdownPersistentSampler() {
+  LOG(INFO) << "Shutting down persistent sampler kernel...";
   SamplerRequest shutdown_req;
   shutdown_req.job_id = -1;
   shutdown_req.seeds = nullptr;
   shutdown_req.num_seeds = 0;
   shutdown_req.fanout = 0;
-  EnqueueSamplerRequest(shutdown_req);
+  LOG(INFO) << "Enqueueing shutdown request";
+  bool req_res = EnqueueSamplerRequest(shutdown_req);
+  LOG(INFO) << "Shutdown request enqueued: " << req_res;
+  LOG(INFO) << "Waiting for persistent sampler kernel to finish";
   cudaStreamSynchronize(persistent_stream);
+  LOG(INFO) << "Persistent sampler kernel finished";
+  LOG(INFO) << "Destroying persistent stream";
   cudaStreamDestroy(persistent_stream);
+  LOG(INFO) << "Persistent stream destroyed";
   persistent_stream = nullptr;
   stream_init_flag.~once_flag();
+  LOG(INFO) << "Persistent sampler kernel shut down";
 }
 
 // Host-side launcher for the persistent kernel

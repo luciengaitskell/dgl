@@ -77,6 +77,14 @@ class NeighborSampler(object):
         return blocks
 
 def run(rank, args):
+    # add immediate-flush override if debugging prints
+    if getattr(args, 'debug', False):
+        import builtins
+        _orig_print = builtins.print
+        def print(*a, **kw):
+            kw['flush'] = True
+            _orig_print(*a, **kw)
+        builtins.print = print
     setup(rank, args.n_ranks)
     ds.init(rank, args.n_ranks, enable_comm_control=False, enable_profiler=args.enable_profiler)
     # load partitioned graph
@@ -167,13 +175,17 @@ def run(rank, args):
         print("rank", rank, "launching persistent sampler...")
         dgl.ds.sampler_persistent_launch()
 
+    print(f"will run with {args.num_epochs} epochs")
     for epoch in range(args.num_epochs):
         tic = time.time()
         # for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
         #     print("rank", rank, "epoch", epoch, "step", step)
         #     pass
         print("rank", rank, "wait for synchronize...")
-        th.cuda.synchronize()
+        # if not os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        s.synchronize()
+        # else:
+        #     print("rank", rank, "skipping synchronize due to persistent sampler")
         print("rank", rank, "wait for synchronize done")
 
         print("rank", rank, "wait for barrier 2...")
@@ -210,6 +222,8 @@ if __name__ == '__main__':
     parser.add_argument('--graph_cache_ratio', default=100, type=int, help='Ratio of edges cached in the GPU')
     parser.add_argument('--enable_profiler', action='store_true',
                            help='Profiler')
+    parser.add_argument('--debug', action='store_true', dest='debug',
+                        help='Enable more prints and immediate flush (debug)')
     parser.add_argument('--graph_cache_gb', default=-1, type=int,
                         help='Memory used to cache graph topology. Setting it not equal to -1 disables graph_cache_ratio')
     args = parser.parse_args()
