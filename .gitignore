@@ -162,3 +162,5 @@ config.cmake
 .ycm_extra_conf.py
 **.png
 
+# NVIDIA
+*.nsys-rep
