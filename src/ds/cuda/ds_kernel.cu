@@ -26,6 +26,11 @@ using namespace dgl::aten;
 namespace dgl {
 namespace ds {
 
+namespace {
+cudaStream_t persistent_stream = nullptr;
+std::once_flag stream_init_flag;
+} // namespace
+
 // Example capacity for the queues
 constexpr int kSamplerQueueCapacity = 32;
 
@@ -81,21 +86,22 @@ __global__ void PopSamplerResultKernel(SamplerResult *res, bool *success) {
   *success = g_sampler_out_queue.pop(res);
 }
 
-bool EnqueueSamplerRequest(const SamplerRequest &req, cudaStream_t stream) {
+bool EnqueueSamplerRequest(const SamplerRequest &req) {
   // Launch a kernel to push the request to the device queue
-  PushSamplerRequestKernel<kSamplerQueueCapacity><<<1, 1, 0, stream>>>(req);
+  PushSamplerRequestKernel<kSamplerQueueCapacity>
+      <<<1, 1, 0, persistent_stream>>>(req);
   cudaError_t err = cudaGetLastError();
   return err == cudaSuccess;
 }
 
-bool DequeueSamplerResult(SamplerResult *res, cudaStream_t stream) {
+bool DequeueSamplerResult(SamplerResult *res) {
   // Allocate device-side result and flag
   SamplerResult *d_res;
   bool *d_success;
   cudaMalloc(&d_res, sizeof(SamplerResult));
   cudaMalloc(&d_success, sizeof(bool));
   // Launch kernel to pop from device queue
-  PopSamplerResultKernel<<<1, 1, 0, stream>>>(d_res, d_success);
+  PopSamplerResultKernel<<<1, 1, 0, persistent_stream>>>(d_res, d_success);
   bool h_success = false;
   cudaMemcpy(&h_success, d_success, sizeof(bool), cudaMemcpyDeviceToHost);
   if (h_success) {
@@ -106,18 +112,29 @@ bool DequeueSamplerResult(SamplerResult *res, cudaStream_t stream) {
   return h_success;
 }
 
-void ShutdownPersistentSampler(cudaStream_t stream) {
+void ShutdownPersistentSampler() {
   SamplerRequest shutdown_req;
   shutdown_req.job_id = -1;
   shutdown_req.seeds = nullptr;
   shutdown_req.num_seeds = 0;
   shutdown_req.fanout = 0;
-  EnqueueSamplerRequest(shutdown_req, stream);
+  EnqueueSamplerRequest(shutdown_req);
+  cudaStreamSynchronize(persistent_stream);
+  cudaStreamDestroy(persistent_stream);
+  persistent_stream = nullptr;
+  stream_init_flag.~once_flag();
 }
 
 // Host-side launcher for the persistent kernel
-void LaunchPersistentSamplerKernel(cudaStream_t stream) {
-  PersistentSamplerKernel<<<1, 32, 0, stream>>>();
+void LaunchPersistentSamplerKernel() {
+  LOG(INFO) << "Launching persistent sampler kernel";
+  std::call_once(stream_init_flag, []() {
+    LOG(INFO) << "Creating persistent stream";
+    CUDACHECK(cudaStreamCreate(&persistent_stream));
+  });
+  LOG(INFO) << "Launching persistent sampler kernel";
+  PersistentSamplerKernel<<<1, 32, 0, persistent_stream>>>();
+  LOG(INFO) << "Persistent sampler kernel launched";
 }
 
 __global__

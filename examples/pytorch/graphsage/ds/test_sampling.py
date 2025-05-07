@@ -78,11 +78,7 @@ class NeighborSampler(object):
 
 def run(rank, args):
     setup(rank, args.n_ranks)
-    # Launch persistent sampler kernel if enabled
-    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
-        dgl.ds.sampler_persistent_launch()
     ds.init(rank, args.n_ranks, enable_comm_control=False, enable_profiler=args.enable_profiler)
-    
     # load partitioned graph
     g, node_feats, edge_feats, gpb, _, _, _ = dgl.distributed.load_partition(args.part_config, rank)
     g = dgl.add_self_loop(g)
@@ -151,20 +147,38 @@ def run(rank, args):
         drop_last=False,
         num_workers=0)
 
+    print("rank", rank, "wait for barrier...")
     th.distributed.barrier()
+    print("rank", rank, "wait for barrier done")
     stop_epoch = -1
     total = 0
     skip_epoch = 5
 
+    print("rank", rank, "creating stream...")
     s = th.cuda.Stream(device=device)
+    print("rank", rank, "setting device thread local stream...")
     dgl.ds.set_device_thread_local_stream(device, s)
+    print("rank", rank, "set device thread local stream done")
+
+    # Launch persistent sampler kernel if enabled
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        print("rank", rank, "setting device...")
+        th.cuda.set_device(device)
+        print("rank", rank, "launching persistent sampler...")
+        dgl.ds.sampler_persistent_launch()
 
     for epoch in range(args.num_epochs):
         tic = time.time()
-        for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
-            pass
+        # for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
+        #     print("rank", rank, "epoch", epoch, "step", step)
+        #     pass
+        print("rank", rank, "wait for synchronize...")
         th.cuda.synchronize()
+        print("rank", rank, "wait for synchronize done")
+
+        print("rank", rank, "wait for barrier 2...")
         th.distributed.barrier()
+        print("rank", rank, "wait for barrier 2 done")
         toc = time.time()
         if rank == 0:
             print('Rank: ', rank, 'world_size: ', args.n_ranks, 'sampling time', toc - tic)

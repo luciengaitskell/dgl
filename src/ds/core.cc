@@ -75,6 +75,7 @@ void Initialize(int rank, int world_size, int thread_num, bool enable_kernel_con
   ds_context->enable_comm_control = enable_comm_control;
 
   int use_nccl = GetEnvParam("USE_NCCL", 0);
+  LOG(INFO) << "Use NCCL? " << use_nccl;
   if (!use_nccl) {
     // Build our communication environment
     ds_context->comm_info.resize(thread_num);
@@ -87,9 +88,13 @@ void Initialize(int rank, int world_size, int thread_num, bool enable_kernel_con
     // Build NCCL environment
     ds_context->nccl_comm.resize(thread_num);
     for (int i=0; i<thread_num; i++) {
+      LOG(INFO) << "Rank " + std::to_string(rank) +
+                       " initializing NCCL communicator - " + std::to_string(i);
       InitNcclComm(&(ds_context->nccl_comm[i]), ds_context, world_size, rank);
     }
   }
+  LOG(INFO) << "Rank " + std::to_string(rank) +
+                   " successfully builds NCCL communicator";
 
   //init scheduler
   std::thread scheduler(&Scheduler::Schedule, Scheduler::Global());
