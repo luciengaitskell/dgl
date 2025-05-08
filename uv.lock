@@ -1,5 +1,4 @@
 version = 1
-revision = 1
 requires-python = ">=3.8.0, <3.9"
 resolution-markers = [
     "sys_platform == 'linux' or sys_platform == 'win32'",

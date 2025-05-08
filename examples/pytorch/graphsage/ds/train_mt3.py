@@ -28,7 +28,7 @@ import os
 
 from dgl.random import seed
 
-os.environ['DGLBACKEND'] = 'pytorch'
+os.environ['DGLBACKPEND'] = 'pytorch'
 
 
 def setup(rank, world_size):

@@ -10,7 +10,9 @@ __all__ = [
     'sample_neighbors',
     'rebalance_train_nids',
     'sample_neighbors_uva',
-    'csr_to_global_id'
+    'csr_to_global_id',
+    'sampler_persistent_launch',
+    'sampler_persistent_shutdown',
     ]
 
 def sample_neighbors(g, num_vertices, device_min_vids, device_min_eids, nodes, fanout, global_nid_map, edge_dir='in', prob=None, replace=True,
@@ -58,7 +60,7 @@ def sampler_persistent_launch():
     Launch the persistent sampler thread.
     """
     _CAPI_DGLDSSamplerPersistentLaunch()
-    
+
 def sampler_persistent_shutdown():
     """
     Shutdown the persistent sampler thread.

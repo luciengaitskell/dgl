@@ -66,15 +66,15 @@ template <typename T, int Capacity> struct DeviceRingQueue {
 };
 
 // Enqueue a sampling request to the device queue
-bool EnqueueSamplerRequest(const SamplerRequest &req, cudaStream_t stream = 0);
+bool EnqueueSamplerRequest(const SamplerRequest &req);
 
 // Try to dequeue a sampling result from the device queue
-bool DequeueSamplerResult(SamplerResult *res, cudaStream_t stream = 0);
+bool DequeueSamplerResult(SamplerResult *res);
 
 // Signal the persistent kernel to shut down
-void ShutdownPersistentSampler(cudaStream_t stream = 0);
+void ShutdownPersistentSampler();
 
-void LaunchPersistentSamplerKernel(cudaStream_t stream = 0);
+void LaunchPersistentSamplerKernel();
 
 /**
  * @brief (inplace) Convert global nid to local nid
