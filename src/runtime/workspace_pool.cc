@@ -25,35 +25,54 @@ class WorkspacePool::Pool {
   }
   // allocate from pool
   void* Alloc(DGLContext ctx, DeviceAPI* device, size_t nbytes) {
+    printf("[TRACE] Alloc called: ctx.device_id=%d, nbytes=%zu\n",
+           ctx.device_id, nbytes);
     // Allocate align to page.
     nbytes = (nbytes + (kWorkspacePageSize - 1)) / kWorkspacePageSize * kWorkspacePageSize;
     if (nbytes == 0) nbytes = kWorkspacePageSize;
+    printf("[TRACE] After align: nbytes=%zu\n", nbytes);
     Entry e;
     DGLType type;
     type.code = kDLUInt;
     type.bits = 8;
     type.lanes = 1;
+    printf("[TRACE] free_list_.size() = %zu\n", free_list_.size());
     if (free_list_.size() == 2) {
+      printf("[TRACE] Branch: free_list_.size() == 2\n");
       e = free_list_.back();
       free_list_.pop_back();
       if (e.size < nbytes) {
-        // resize the page
+        printf("[TRACE] Resizing page in free_list_.size() == 2\n");
+        printf("[DEBUG] About to FreeDataSpace, data=%p\n", e.data);
         device->FreeDataSpace(ctx, e.data);
-        e.data = device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
+        printf("[DEBUG] FreeDataSpace done\n");
+        printf("[DEBUG] About to AllocDataSpace, nbytes=%zu\n", nbytes);
+        void *new_ptr =
+            device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
+        printf("[DEBUG] AllocDataSpace returned %p\n", new_ptr);
+        e.data = new_ptr;
         e.size = nbytes;
       }
     } else if (free_list_.size() == 1) {
+      printf("[TRACE] Branch: free_list_.size() == 1\n");
       e.data = device->AllocDataSpace(ctx, nbytes, kTempAllocaAlignment, type);
       e.size = nbytes;
     } else {
+      printf("[TRACE] Branch: free_list_.size() > 2\n");
       if (free_list_.back().size >= nbytes) {
-        // find smallest fit
+        printf("[TRACE] free_list_.back().size >= nbytes, entering smallest "
+               "fit search\n");
+        printf("[DEBUG] Entering smallest fit search: free_list_.size() = %zu, "
+               "nbytes = %zu\n",
+               free_list_.size(), nbytes);
         auto it = free_list_.end() - 2;
-        for (; it->size >= nbytes; --it) {}
         e = *(it + 1);
         free_list_.erase(it + 1);
+        printf("[DEBUG] Selected entry at %ld, size = %zu\n",
+               (it + 1) - free_list_.begin(), e.size);
       } else {
-        // resize the page
+        printf("[TRACE] Resizing page in free_list_.size() > 2, "
+               "free_list_.back().size < nbytes\n");
         e = free_list_.back();
         free_list_.pop_back();
         device->FreeDataSpace(ctx, e.data);
@@ -62,6 +81,7 @@ class WorkspacePool::Pool {
       }
     }
     allocated_.push_back(e);
+    printf("[TRACE] Alloc returning: e.data=%p, e.size=%zu\n", e.data, e.size);
     return e.data;
   }
   // free resource back to pool
@@ -135,12 +155,16 @@ WorkspacePool::~WorkspacePool() {
 }
 
 void* WorkspacePool::AllocWorkspace(DGLContext ctx, size_t size) {
+  printf("AllocWorkspace %d\n", ctx.device_id);
   if (static_cast<size_t>(ctx.device_id) >= array_.size()) {
     array_.resize(ctx.device_id + 1, nullptr);
+    printf("resize %d\n", array_.size());
   }
   if (array_[ctx.device_id] == nullptr) {
     array_[ctx.device_id] = new Pool();
+    printf("new pool %d\n", ctx.device_id);
   }
+  printf("will return %d\n", ctx.device_id);
   return array_[ctx.device_id]->Alloc(ctx, device_.get(), size);
 }
 

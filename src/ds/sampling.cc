@@ -85,11 +85,14 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
     LOG(FATAL) << "Seeds are not on GPUs";
   }
 
+  LOG(INFO) << "is_local: " << is_local;
   if (is_local) {
     seeds = Partition(seeds, min_vids);
+    LOG(INFO) << "partitioned, now need to synchronize";
     CUDACHECK(cudaStreamSynchronize(s));
   }
-  
+
+  LOG(INFO) << "will cluster";
   IdArray send_sizes, send_offset;
   Cluster(rank, seeds, min_vids, world_size, &send_sizes, &send_offset);
   if(context->enable_profiler) {
@@ -97,12 +100,16 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
     context->profiler->UpdateDSSamplingNvlinkCount(send_offset, fanout);
   }
 
+  LOG(INFO) << "will rebalance";
   IdArray frontier, recv_offset;
   std::tie(frontier, recv_offset) = Alltoall(seeds, send_offset, 1, rank, world_size);
 
+  LOG(INFO) << "will convert gid to lid";
   ConvertGidToLid(frontier, min_vids, rank);
 
   // Replace per-batch sampling with persistent kernel if enabled
+  LOG(INFO) << "will sample neighbors - use_persistent_sampler: "
+            << use_persistent_sampler;
   IdArray neighbors;
   if (use_persistent_sampler) {
     neighbors = SampleNeighborsPersistent(frontier, fanout, weight, bias);
@@ -110,6 +117,7 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
     neighbors = SampleNeighbors(frontier, fanout, weight, bias);
   }
 
+  LOG(INFO) << "will rebalance";
   IdArray reshuffled_neighbors, reshuffle_recv_offset;
   std::tie(reshuffled_neighbors, reshuffle_recv_offset) = Alltoall(neighbors, recv_offset, fanout, rank, world_size, send_offset);
 
@@ -121,6 +129,7 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
   *rv = ret;
   // *rv = HeteroGraphRef(subg);
   CUDACHECK(cudaStreamSynchronize(s));
+  LOG(INFO) << "synchronized!";
 });
 
 DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSamplerPersistentLaunch")

@@ -99,8 +99,11 @@ class CUDADeviceAPI final : public DeviceAPI {
   }
 
   void FreeDataSpace(DGLContext ctx, void* ptr) final {
+    printf("Will free CUDA memory at %p for device %d\n", ptr, ctx.device_id);
     CUDA_CALL(cudaSetDevice(ctx.device_id));
+    printf("Freeing CUDA memory at %p for device %d\n", ptr, ctx.device_id);
     CUDA_CALL(cudaFree(ptr));
+    printf("Freed CUDA memory at %p for device %d\n", ptr, ctx.device_id);
   }
 
   void CopyDataFromTo(const void* from,

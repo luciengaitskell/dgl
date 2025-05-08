@@ -136,17 +136,24 @@ std::pair<IdArray, IdArray> MultiWayScan(IdArray input, IdArray part_offset, IdA
   if(input->shape[0] == 0) {
     return {NullArray(input->dtype, input->ctx), NullArray(input->dtype, input->ctx)};
   }
+  printf("Starting multi-way scan\n");
   int size = input->shape[0];
   auto device = DeviceAPI::Get(input->ctx);
   size_t workspace_size = world_size * size * sizeof(IdType);
+  printf("Allocating workspace of size %zu\n", workspace_size);
   IdType* workspace = (IdType*)device->AllocWorkspace(input->ctx, workspace_size);
+  printf("Finished allocating workspace\n");
   _MultiWayScanRecursive(workspace, size, part_ids.Ptr<IdType>(), world_size, device, input->ctx);
+  printf("Finished multi-way recursive scan\n");
 
   IdArray sorted = IdArray::Empty({input->shape[0]}, input->dtype, input->ctx);
   IdArray index = IdArray::Empty({input->shape[0]}, input->dtype, input->ctx);
 
+  printf("Will permutate\n");
   _Permutate(workspace, input.Ptr<IdType>(), part_offset.Ptr<IdType>(), part_ids.Ptr<IdType>(), size, world_size, sorted.Ptr<IdType>(), index.Ptr<IdType>());
+  printf("Finished permutate\n");
   device->FreeWorkspace(input->ctx, workspace);
+  printf("Finished workspace\n");
   return {sorted, index};
 }
 

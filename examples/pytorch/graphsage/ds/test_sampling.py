@@ -175,12 +175,14 @@ def run(rank, args):
         print("rank", rank, "launching persistent sampler...")
         dgl.ds.sampler_persistent_launch()
 
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_shutdown()
+
     print(f"will run with {args.num_epochs} epochs")
     for epoch in range(args.num_epochs):
         tic = time.time()
-        # for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
-        #     print("rank", rank, "epoch", epoch, "step", step)
-        #     pass
+        for step, (input_nodes, seeds, blocks) in enumerate(dataloader):
+            print("rank", rank, "epoch", epoch, "step", step)
         print("rank", rank, "wait for synchronize...")
         # if not os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
         s.synchronize()
@@ -203,8 +205,6 @@ def run(rank, args):
     if rank == 0:
         print("rank:", rank, 'world_size: ', args.n_ranks, "sampling time:", total/(args.num_epochs - skip_epoch))
     
-    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
-        dgl.ds.sampler_persistent_shutdown()
     cleanup()
   
 

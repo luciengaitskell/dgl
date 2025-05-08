@@ -100,14 +100,18 @@ class DistDataLoader:
             self.pool.delete_collate_fn(self.name)
 
     def __next__(self):
+        print("GET NEXT")
         if self.pool is None:
             num_reqs = 1
         else:
             num_reqs = self.queue_size - self.num_pending
         for _ in range(num_reqs):
+            print("REQUEST NEXT BATCH")
             self._request_next_batch()
         if self.recv_idxs < self.expected_idxs:
+            print("RECV IDX", self.recv_idxs)
             result = self._get_data_from_result_queue()
+            print("RESULT", result)
             self.recv_idxs += 1
             self.num_pending -= 1
             return result

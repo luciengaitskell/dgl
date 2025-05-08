@@ -266,12 +266,16 @@ IdArray Partition(IdArray seeds, IdArray min_vids) {
   if (grid.x == 0) grid.x = 1;
   KernelController::AdjustKernelSize(grid, block);
   auto* thr_entry = CUDAThreadEntry::ThreadLocal();
+  printf("Let's start counting device vertices\n");
   _CountDeviceVerticesKernel<<<grid, block, 0, thr_entry->stream>>>(world_size, min_vids.Ptr<IdType>(),
                                                                             seeds->shape[0], seeds.Ptr<IdType>(),
                                                                             part_sizes.Ptr<IdType>(), part_ids.Ptr<IdType>());
+  printf("Count device vertices done\n");
   IdArray part_offset = CumSum(part_sizes, true);
+  printf("CumSum done\n");
   IdArray sorted, index;
   std::tie(sorted, index) = MultiWayScan(seeds, part_offset, part_ids, world_size);
+  printf("MultiWayScan done\n");
   // std::tie(sorted, index) = Sort(seeds);
   return sorted;
 }
@@ -681,7 +685,7 @@ IdArray SampleNeighborsPersistent(IdArray frontier, int fanout,
   dgl::ds::EnqueueSamplerRequest(req);
   dgl::ds::SamplerResult res;
   // Busy-wait for result (could add timeout or yield)
-  while (!dgl::ds::DequeueSamplerResult(&res)) {
+  while (false && !dgl::ds::DequeueSamplerResult(&res)) {
   }
   // Wrap the result in an IdArray (assume neighbors are int64_t)
   // For prototype, just return a view on the same memory
