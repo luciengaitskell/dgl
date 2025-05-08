@@ -10,11 +10,50 @@
 #include <cuda_runtime.h>
 #include "cuda_common.h"
 
+// Added includes
+#include <map>
+#include <mutex>
+#include <vector>
+
 namespace dgl {
 namespace runtime {
 
 class CUDADeviceAPI final : public DeviceAPI {
- public:
+private: // Added private members
+  std::map<int, std::map<size_t, std::vector<void *>>> free_lists_by_device_;
+  std::map<int, std::map<void *, size_t>>
+      allocated_block_sizes_by_device_; // New: Tracks active allocations' sizes
+  std::mutex free_list_mutex_;
+
+public:
+  // Destructor to clean up pooled memory
+  ~CUDADeviceAPI() {
+    std::lock_guard<std::mutex> lock(free_list_mutex_);
+    // Free blocks in the free lists
+    for (auto const &[device_id, size_map] : free_lists_by_device_) {
+      CUDA_CALL(cudaSetDevice(device_id));
+      for (auto const &[size, ptr_vector] : size_map) {
+        for (void *ptr : ptr_vector) {
+          CUDA_CALL(cudaFree(ptr));
+        }
+      }
+    }
+    free_lists_by_device_.clear();
+
+    // Free any outstanding allocated blocks not returned to the pool
+    for (auto const &[device_id, ptr_size_map] :
+         allocated_block_sizes_by_device_) {
+      CUDA_CALL(cudaSetDevice(device_id));
+      for (auto const &[ptr, size] : ptr_size_map) {
+        LOG(WARNING)
+            << "CUDADeviceAPI destructor: Cleaning up unfreed block of size "
+            << size << " at address " << ptr << " on device " << device_id;
+        CUDA_CALL(cudaFree(ptr));
+      }
+    }
+    allocated_block_sizes_by_device_.clear();
+  }
+
   void SetDevice(DGLContext ctx) final {
     CUDA_CALL(cudaSetDevice(ctx.device_id));
   }
@@ -86,24 +125,83 @@ class CUDADeviceAPI final : public DeviceAPI {
     }
     *rv = value;
   }
-  void* AllocDataSpace(DGLContext ctx,
-                       size_t nbytes,
-                       size_t alignment,
-                       DGLType type_hint) final {
+  void *AllocDataSpace(DGLContext ctx,
+                       size_t nbytes, // User requested size
+                       size_t alignment, DGLType type_hint) final {
     CUDA_CALL(cudaSetDevice(ctx.device_id));
+    // CUDA memory is generally aligned to at least 256 bytes.
+    // This check ensures the requested alignment is compatible.
     CHECK_EQ(256 % alignment, 0U)
-        << "CUDA space is aligned at 256 bytes";
-    void *ret;
-    CUDA_CALL(cudaMalloc(&ret, nbytes));
-    return ret;
+        << "CUDA space is aligned at 256 bytes. Requested alignment="
+        << alignment << " is not compatible.";
+
+    void *ptr_to_return = nullptr;
+
+    { // Scope for lock
+      std::lock_guard<std::mutex> lock(free_list_mutex_);
+      auto &device_free_lists = free_lists_by_device_[ctx.device_id];
+      auto it_size_list = device_free_lists.find(nbytes);
+
+      if (it_size_list != device_free_lists.end() &&
+          !it_size_list->second.empty()) {
+        // Found a suitable block in the free list
+        std::vector<void *> &size_list = it_size_list->second;
+        ptr_to_return = size_list.back();
+        size_list.pop_back();
+        if (size_list.empty()) {
+          device_free_lists.erase(it_size_list);
+        }
+        // Track this allocation
+        allocated_block_sizes_by_device_[ctx.device_id][ptr_to_return] = nbytes;
+      } else {
+        // Not found in free list, allocate new
+        CUDA_CALL(cudaMalloc(&ptr_to_return, nbytes));
+        if (ptr_to_return == nullptr) {
+          // CUDA_CALL should handle errors, but an explicit check is safer.
+          LOG(FATAL) << "cudaMalloc failed to allocate " << nbytes
+                     << " bytes on device " << ctx.device_id;
+          // This LOG(FATAL) will typically terminate. If not, an exception or
+          // error return is needed.
+        }
+        // Track this new allocation
+        allocated_block_sizes_by_device_[ctx.device_id][ptr_to_return] = nbytes;
+      }
+    } // Lock released
+    return ptr_to_return;
   }
 
-  void FreeDataSpace(DGLContext ctx, void* ptr) final {
-    printf("Will free CUDA memory at %p for device %d\n", ptr, ctx.device_id);
-    CUDA_CALL(cudaSetDevice(ctx.device_id));
-    printf("Freeing CUDA memory at %p for device %d\n", ptr, ctx.device_id);
-    CUDA_CALL(cudaFree(ptr));
-    printf("Freed CUDA memory at %p for device %d\n", ptr, ctx.device_id);
+  void FreeDataSpace(DGLContext ctx, void *user_ptr) final {
+    if (user_ptr == nullptr) {
+      return;
+    }
+
+    void *raw_ptr = user_ptr; // user_ptr is the raw pointer, no header offset
+    size_t nbytes = 0;
+
+    { // Scope for lock
+      std::lock_guard<std::mutex> lock(free_list_mutex_);
+      auto &device_allocations =
+          allocated_block_sizes_by_device_[ctx.device_id];
+      auto it_alloc = device_allocations.find(raw_ptr);
+
+      if (it_alloc == device_allocations.end()) {
+        LOG(WARNING)
+            << "Attempting to free an untracked or already freed pointer: "
+            << raw_ptr << " on device " << ctx.device_id
+            << ". This might indicate a double free or freeing an invalid "
+               "pointer.";
+        // Depending on desired strictness, could be LOG(FATAL) or an error
+        // throw. For now, log a warning and return to avoid crashing if it's a
+        // non-critical error.
+        return;
+      }
+      nbytes = it_alloc->second;
+      device_allocations.erase(it_alloc); // Remove from active allocations
+
+      // Add raw_ptr to the free list for reuse
+      free_lists_by_device_[ctx.device_id][nbytes].push_back(raw_ptr);
+    } // Lock released
+    // cudaFree is not called here; the block is kept in the pool.
   }
 
   void CopyDataFromTo(const void* from,
