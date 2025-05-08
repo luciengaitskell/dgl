@@ -54,9 +54,7 @@ __global__ void PersistentSamplerKernel() {
   __syncthreads();
   printf("Persistent kernel running\n");
 
-  int64_t count = 0;
   while (persistent_kernel_running) {
-    count++;
     // Only one thread handles the queue for simplicity (can be extended)
     if (threadIdx.x == 0 && blockIdx.x == 0) {
       SamplerRequest req;
@@ -84,11 +82,6 @@ __global__ void PersistentSamplerKernel() {
     }
 
     __syncthreads();
-
-    // if (count >= 100000000) {
-    //   printf("Persistent kernel running for too long. Exiting.\n");
-    //   break; // let's cancel it
-    // }
   }
 }
 
