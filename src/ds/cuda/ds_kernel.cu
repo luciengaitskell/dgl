@@ -29,6 +29,8 @@ namespace ds {
 namespace {
 cudaStream_t persistent_stream = nullptr;
 std::once_flag stream_init_flag;
+SamplerResult *d_res_persistent = nullptr;
+bool *d_success_persistent = nullptr;
 } // namespace
 
 // Example capacity for the queues
@@ -76,9 +78,11 @@ __global__ void PersistentSamplerKernel() {
         res.job_id = req.job_id;
         // Push result to output queue
 
-        while (false && !g_sampler_out_queue.push(res)) {
+        while (!g_sampler_out_queue.push(res)) {
           // Busy-wait until space is available
         }
+        printf("Result pushed to queue: job_id=%d, num_neighbors=%d\n",
+               res.job_id, res.num_neighbors);
       }
     }
 
@@ -112,24 +116,33 @@ bool EnqueueSamplerRequest(const SamplerRequest &req) {
 }
 
 bool DequeueSamplerResult(SamplerResult *res) {
-  // Allocate device-side result and flag
+  // Use pre-allocated persistent device-side result and flag
   auto *thr_entry = CUDAThreadEntry::ThreadLocal();
-  SamplerResult *d_res;
-  bool *d_success;
-  cudaMalloc(&d_res, sizeof(SamplerResult));
-  cudaMalloc(&d_success, sizeof(bool));
-  // Launch kernel to pop from device queue
-  PopSamplerResultKernel<<<1, 1, 0, thr_entry->stream>>>(d_res, d_success);
-  bool h_success = false;
-  cudaMemcpy(&h_success, d_success, sizeof(bool), cudaMemcpyDeviceToHost);
-  if (h_success) {
-    cudaMemcpy(res, d_res, sizeof(SamplerResult), cudaMemcpyDeviceToHost);
+  // Ensure persistent variables are initialized
+  if (!d_res_persistent || !d_success_persistent) {
+    LOG(FATAL) << "Persistent sampler result buffers not initialized. Call "
+                  "LaunchPersistentSamplerKernel first.";
+    return false;
   }
-  // cudaFreeAsync(d_res);
-  cudaFree(d_res);
-  // cudaFreeAsync(d_success);
-  cudaFree(d_success);
-  return h_success;
+
+  // Launch kernel to pop from device queue
+  PopSamplerResultKernel<<<1, 1, 0, thr_entry->stream>>>(d_res_persistent,
+                                                         d_success_persistent);
+  // It's important to synchronize the stream here to ensure
+  // d_success_persistent is updated before being accessed by the CPU.
+  cudaError_t err = cudaStreamSynchronize(thr_entry->stream);
+  if (err != cudaSuccess) {
+    LOG(ERROR) << "cudaStreamSynchronize failed in DequeueSamplerResult: "
+               << cudaGetErrorString(err);
+    // Handle error appropriately, maybe return false or throw
+    return false;
+  }
+
+  if (*d_success_persistent) {
+    *res = *d_res_persistent; // Copy data to the user-provided buffer
+  }
+  // printf("Dequeueing result DONE (using persistent buffers)\n");
+  return *d_success_persistent;
 }
 
 void ShutdownPersistentSampler() {
@@ -145,6 +158,18 @@ void ShutdownPersistentSampler() {
   LOG(INFO) << "Waiting for persistent sampler kernel to finish";
   cudaStreamSynchronize(persistent_stream);
   LOG(INFO) << "Persistent sampler kernel finished";
+
+  if (d_res_persistent) {
+    LOG(INFO) << "Freeing persistent d_res_persistent";
+    cudaFreeHost(d_res_persistent);
+    d_res_persistent = nullptr;
+  }
+  if (d_success_persistent) {
+    LOG(INFO) << "Freeing persistent d_success_persistent";
+    cudaFreeHost(d_success_persistent);
+    d_success_persistent = nullptr;
+  }
+
   LOG(INFO) << "Destroying persistent stream";
   cudaStreamDestroy(persistent_stream);
   LOG(INFO) << "Persistent stream destroyed";
@@ -159,6 +184,9 @@ void LaunchPersistentSamplerKernel() {
   std::call_once(stream_init_flag, []() {
     LOG(INFO) << "Creating persistent stream";
     CUDACHECK(cudaStreamCreate(&persistent_stream));
+    LOG(INFO) << "Allocating persistent buffers for DequeueSamplerResult";
+    CUDACHECK(cudaMallocHost(&d_res_persistent, sizeof(SamplerResult)));
+    CUDACHECK(cudaMallocHost(&d_success_persistent, sizeof(bool)));
   });
   LOG(INFO) << "Launching persistent sampler kernel";
   PersistentSamplerKernel<<<1, 32, 0, persistent_stream>>>();
@@ -688,8 +716,12 @@ IdArray SampleNeighborsPersistent(IdArray frontier, int fanout,
   dgl::ds::EnqueueSamplerRequest(req);
   dgl::ds::SamplerResult res;
   // Busy-wait for result (could add timeout or yield)
-  while (false && !dgl::ds::DequeueSamplerResult(&res)) {
+  printf("Waiting for result...\n");
+  while (!dgl::ds::DequeueSamplerResult(&res)) {
+    printf("try waiting for result...\n");
   }
+  printf("Result received: job_id=%d, num_neighbors=%d\n", res.job_id,
+         res.num_neighbors);
   // Wrap the result in an IdArray (assume neighbors are int64_t)
   // For prototype, just return a view on the same memory
   // In production, copy to a new IdArray as needed
