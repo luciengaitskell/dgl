@@ -95,6 +95,7 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
   LOG(INFO) << "will cluster";
   IdArray send_sizes, send_offset;
   Cluster(rank, seeds, min_vids, world_size, &send_sizes, &send_offset);
+
   if(context->enable_profiler) {
     CUDACHECK(cudaStreamSynchronize(s));
     context->profiler->UpdateDSSamplingNvlinkCount(send_offset, fanout);
@@ -113,14 +114,16 @@ DGL_REGISTER_GLOBAL("ds.sampling._CAPI_DGLDSSampleNeighbors")
   IdArray neighbors;
   if (use_persistent_sampler) {
     neighbors = SampleNeighborsPersistent(frontier, fanout, weight, bias);
-  } else {
-    neighbors = SampleNeighbors(frontier, fanout, weight, bias);
   }
+  // else {
+  neighbors = SampleNeighbors(frontier, fanout, weight, bias);
+  //}
 
   LOG(INFO) << "will rebalance";
   IdArray reshuffled_neighbors, reshuffle_recv_offset;
   std::tie(reshuffled_neighbors, reshuffle_recv_offset) = Alltoall(neighbors, recv_offset, fanout, rank, world_size, send_offset);
 
+  LOG(INFO) << "will create COO";
   HeteroGraphPtr subg = CreateCOO(num_vertices, seeds, fanout, reshuffled_neighbors);
   
   List<ObjectRef> ret;

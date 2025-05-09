@@ -175,9 +175,6 @@ def run(rank, args):
         print("rank", rank, "launching persistent sampler...")
         dgl.ds.sampler_persistent_launch()
 
-    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
-        dgl.ds.sampler_persistent_shutdown()
-
     print(f"will run with {args.num_epochs} epochs")
     for epoch in range(args.num_epochs):
         tic = time.time()
@@ -198,6 +195,11 @@ def run(rank, args):
             print('Rank: ', rank, 'world_size: ', args.n_ranks, 'sampling time', toc - tic)
         if epoch >= skip_epoch:
             total += (toc - tic)
+
+
+    if os.environ.get('DGL_DS_USE_PERSISTENT_SAMPLER'):
+        dgl.ds.sampler_persistent_shutdown()
+
     
     if args.enable_profiler:
         ds.profiler_report(args.num_epochs)

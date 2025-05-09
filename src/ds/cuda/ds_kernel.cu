@@ -75,7 +75,8 @@ __global__ void PersistentSamplerKernel() {
         res.num_neighbors = req.num_seeds; // placeholder
         res.job_id = req.job_id;
         // Push result to output queue
-        while (!g_sampler_out_queue.push(res)) {
+
+        while (false && !g_sampler_out_queue.push(res)) {
           // Busy-wait until space is available
         }
       }
@@ -124,7 +125,9 @@ bool DequeueSamplerResult(SamplerResult *res) {
   if (h_success) {
     cudaMemcpy(res, d_res, sizeof(SamplerResult), cudaMemcpyDeviceToHost);
   }
+  // cudaFreeAsync(d_res);
   cudaFree(d_res);
+  // cudaFreeAsync(d_success);
   cudaFree(d_success);
   return h_success;
 }
